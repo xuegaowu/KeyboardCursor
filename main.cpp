@@ -35,6 +35,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+// 数学库：fabs 用来给速度上限做绝对值比较
+#include <cmath>
 // 多媒体库：仅用于老系统兜底时的 timeBeginPeriod(1)。
 #include <mmsystem.h>
 #pragma comment(lib, "winmm.lib")
@@ -646,28 +648,29 @@ void ReadEditsIntoDraft(HWND hwnd) {
     char buf[32];
     int v;
 
-    // 速度相关的三项允许小数，用 atof 解析；非法输入回写草稿里的原值。
+    // 初始速度：-100~100。符号决定方向（负 = 反向），0 = 静止起步。
     GetDlgItemTextA(hwnd, ID_EDIT_SPEED, buf, 32);
     double spd = atof(buf);
-    if (spd >= 0.1 && spd <= 100.0) g_draft.moveSpeed = spd;
+    if (spd >= -100.0 && spd <= 100.0) g_draft.moveSpeed = spd;
     else SetDlgItemTextA(hwnd, ID_EDIT_SPEED, FormatSpeed(g_draft.moveSpeed).c_str());
 
-    // 加速度：0~50。填 0 表示不加速，行为退化成原来的匀速移动。
+    // 加速度：-50~50。负值 = 减速（减到 0 停住，不会自己反向）。
     GetDlgItemTextA(hwnd, ID_EDIT_ACCEL, buf, 32);
     double acc = atof(buf);
-    if (acc >= 0.0 && acc <= 50.0) g_draft.moveAccel = acc;
+    if (acc >= -50.0 && acc <= 50.0) g_draft.moveAccel = acc;
     else SetDlgItemTextA(hwnd, ID_EDIT_ACCEL, FormatSpeed(g_draft.moveAccel).c_str());
 
-    // 速度上限：0.1~200。上限比初速还小时，线程里会按初速处理，不会卡住。
+    // 速度上限：0~200。不小于初速时是天花板，小于初速时当下限用
+    // （速度不会低于它，上界改成初速）——旧配置的手感因此得以保留。
     GetDlgItemTextA(hwnd, ID_EDIT_MAXSPEED, buf, 32);
     double mx = atof(buf);
-    if (mx >= 0.1 && mx <= 200.0) g_draft.moveMaxSpeed = mx;
+    if (mx >= 0.0 && mx <= 200.0) g_draft.moveMaxSpeed = mx;
     else SetDlgItemTextA(hwnd, ID_EDIT_MAXSPEED, FormatSpeed(g_draft.moveMaxSpeed).c_str());
 
-    // 加速倍率：0.1~100，允许小数。小于 1 就是减速（按住反而变慢）。
+    // 加速倍率：-100~100。负值 = 按住时翻转方向；0 = 刹车。
     GetDlgItemTextA(hwnd, ID_EDIT_SPEED_MUL, buf, 32);
     double mulV = atof(buf);
-    if (mulV >= 0.1 && mulV <= 100.0) g_draft.speedMul = mulV;
+    if (mulV >= -100.0 && mulV <= 100.0) g_draft.speedMul = mulV;
     else SetDlgItemTextA(hwnd, ID_EDIT_SPEED_MUL, FormatSpeed(g_draft.speedMul).c_str());
 
     GetDlgItemTextA(hwnd, ID_EDIT_WHEEL_INTERVAL, buf, 32);
@@ -852,35 +855,36 @@ LoadResult LoadFromFile(const std::string& name) {
     }
 
     // 缺省值使用程序的"出厂默认"，这样即便存档缺失/损坏也能保持可用。
-    // 初始速度允许小数：atof 解析后钳到 0.1~100，防止 ini 被手改成 0 或负数。
+    // 初始速度：允许负数（方向反转）和小数，钳到 -100~100。
     char speedBuf[32] = {};
     GetPrivateProfileStringA("Speed", "MOVE_SPEED", "1.5", speedBuf, 32, path.c_str());
     double spd = atof(speedBuf);
-    if (spd < 0.1) spd = 0.1;
-    if (spd > 100.0) spd = 100.0;
+    if (spd < -100.0) spd = -100.0;
+    if (spd >  100.0) spd =  100.0;
     MOVE_SPEED = spd;
 
-    // 加速度：缺省 0.02。老存档没有这个键时也取它 —— 升级后直接获得新手感。
+    // 加速度：缺省 0.02。负值 = 减速，钳到 -50~50。
     char accBuf[32] = {};
     GetPrivateProfileStringA("Speed", "MOVE_ACCEL", "0.02", accBuf, 32, path.c_str());
     double accV = atof(accBuf);
-    if (accV < 0.0) accV = 0.0;
-    if (accV > 50.0) accV = 50.0;
+    if (accV < -50.0) accV = -50.0;
+    if (accV >  50.0) accV =  50.0;
     MOVE_ACCEL = accV;
 
-    // 速度上限：缺省 12，钳到 0.1~200
+    // 速度上限：缺省 5，钳到 0~200。小于初速时当下限用，不小于时当天花板。
     char maxBuf[32] = {};
     GetPrivateProfileStringA("Speed", "MOVE_MAX_SPEED", "5", maxBuf, 32, path.c_str());
     double maxV = atof(maxBuf);
-    if (maxV < 0.1) maxV = 0.1;
+    if (maxV < 0.0) maxV = 0.0;
     if (maxV > 200.0) maxV = 200.0;
     MOVE_MAX_SPEED = maxV;
-    // 加速倍率：允许小数，钳到 0.1~100。小于 1 表示按住时减速（精确操作）。
+
+    // 加速倍率：允许小数和负值，钳到 -100~100。负值 = 按住时翻转方向。
     char mulBuf[32] = {};
     GetPrivateProfileStringA("Speed", "SPEED_MULTIPLIER", "3", mulBuf, 32, path.c_str());
     double mulV = atof(mulBuf);
-    if (mulV < 0.1) mulV = 0.1;
-    if (mulV > 100.0) mulV = 100.0;
+    if (mulV < -100.0) mulV = -100.0;
+    if (mulV >  100.0) mulV =  100.0;
     SPEED_MULTIPLIER = mulV;
     WHEEL_INTERVAL = GetPrivateProfileIntA("Speed", "WHEEL_INTERVAL", 80, path.c_str());
     WHEEL_SPEED = GetPrivateProfileIntA("Speed", "WHEEL_SPEED", 1, path.c_str());
@@ -1243,13 +1247,19 @@ bool IsNonRepeatingKey(int vk) {
 }
 
 // 判断某个"标记为按下"的键，实际上是不是已经松开了。
-//   - 没被我们的钩子拦截的键：系统状态是真实的，直接问 GetAsyncKeyState，
-//     这样 Shift 这类不重复的修饰键也能准确判断。
-//   - 被拦截的键：系统里读不到，只能靠自动重复的时间戳兜底。
-bool KeyLooksReleased(int vk, DWORD lastDown) {
+//   - 没被钩子拦截的键：系统状态是真实的，直接问 GetAsyncKeyState。
+//   - 被拦截的键：系统里读不到，只能靠"最后一次 keydown"的时间戳。
+//     但时间戳本身不可靠：
+//       · 同时按住多个键时，系统只重复"最后按下的那个"，先按的会停止重复；
+//       · 最后按下的若是 Shift 这类修饰键，根本不会重复。
+//     所以必须再叠加"注入是否被挡"：只有确实推不动光标时，才认为
+//     那些超时没收到 keydown 的键真的松开了。
+bool KeyLooksReleased(int vk, DWORD lastDown, bool injectionBlocked) {
     if (!ShouldIntercept((DWORD)vk)) {
         return (GetAsyncKeyState(vk) & 0x8000) == 0;
     }
+    if (!injectionBlocked) return false;   // 光标还能动，说明键还按着
+
     const DWORD limit = IsNonRepeatingKey(vk) ? 5000 : 1200;
     return (GetTickCount() - lastDown) > limit;
 }
@@ -1258,28 +1268,29 @@ bool KeyLooksReleased(int vk, DWORD lastDown) {
 // 兜底：如果某个键的 keyup 丢了（切到任务管理器这类高权限窗口、锁屏、
 // 钩子被系统摘掉），标记会一直停在"按下"，光标就会自己走。
 // 每个 tick 在驱动鼠标之前先跑一遍，把这类残留状态清掉。
-void WatchdogKeyStates() {
-    if (keyE.load() && KeyLooksReleased(keyUp.load(), g_lastKeyDown[SLOT_UP].load()))
+// injectionBlocked：最近几帧"要求移动但光标没动"，说明注入被系统挡了。
+void WatchdogKeyStates(bool injectionBlocked) {
+    if (keyE.load() && KeyLooksReleased(keyUp.load(), g_lastKeyDown[SLOT_UP].load(), injectionBlocked))
         keyE = false;
-    if (keyD.load() && KeyLooksReleased(keyDown.load(), g_lastKeyDown[SLOT_DOWN].load()))
+    if (keyD.load() && KeyLooksReleased(keyDown.load(), g_lastKeyDown[SLOT_DOWN].load(), injectionBlocked))
         keyD = false;
-    if (keyS.load() && KeyLooksReleased(keyLeft.load(), g_lastKeyDown[SLOT_LEFT].load()))
+    if (keyS.load() && KeyLooksReleased(keyLeft.load(), g_lastKeyDown[SLOT_LEFT].load(), injectionBlocked))
         keyS = false;
-    if (keyF.load() && KeyLooksReleased(keyRight.load(), g_lastKeyDown[SLOT_RIGHT].load()))
+    if (keyF.load() && KeyLooksReleased(keyRight.load(), g_lastKeyDown[SLOT_RIGHT].load(), injectionBlocked))
         keyF = false;
-    if (keyJ.load() && KeyLooksReleased(keyLClick.load(), g_lastKeyDown[SLOT_LCLICK].load()))
+    if (keyJ.load() && KeyLooksReleased(keyLClick.load(), g_lastKeyDown[SLOT_LCLICK].load(), injectionBlocked))
         keyJ = false;
-    if (keyK.load() && KeyLooksReleased(keyRClick.load(), g_lastKeyDown[SLOT_RCLICK].load()))
+    if (keyK.load() && KeyLooksReleased(keyRClick.load(), g_lastKeyDown[SLOT_RCLICK].load(), injectionBlocked))
         keyK = false;
-    if (keyM.load() && KeyLooksReleased(keyMClick.load(), g_lastKeyDown[SLOT_MCLICK].load()))
+    if (keyM.load() && KeyLooksReleased(keyMClick.load(), g_lastKeyDown[SLOT_MCLICK].load(), injectionBlocked))
         keyM = false;
-    if (keyO.load() && KeyLooksReleased(keyWheelUp.load(), g_lastKeyDown[SLOT_WHEELUP].load()))
+    if (keyO.load() && KeyLooksReleased(keyWheelUp.load(), g_lastKeyDown[SLOT_WHEELUP].load(), injectionBlocked))
         keyO = false;
-    if (keyL.load() && KeyLooksReleased(keyWheelDown.load(), g_lastKeyDown[SLOT_WHEELDOWN].load()))
+    if (keyL.load() && KeyLooksReleased(keyWheelDown.load(), g_lastKeyDown[SLOT_WHEELDOWN].load(), injectionBlocked))
         keyL = false;
-    if (keyBoostDown.load() && KeyLooksReleased(keyBoost.load(), g_lastKeyDown[SLOT_BOOST].load()))
+    if (keyBoostDown.load() && KeyLooksReleased(keyBoost.load(), g_lastKeyDown[SLOT_BOOST].load(), injectionBlocked))
         keyBoostDown = false;
-    if (capsDown.load() && KeyLooksReleased(VK_CAPITAL, g_lastKeyDown[SLOT_CAPS].load()))
+    if (capsDown.load() && KeyLooksReleased(VK_CAPITAL, g_lastKeyDown[SLOT_CAPS].load(), injectionBlocked))
         capsDown = false;
 }
 
@@ -1297,13 +1308,22 @@ void MouseControlThread() {
     double moveSpeedNow = 0.0;
     int lastDirX = 0, lastDirY = 0;
 
+    // 上一帧的"有效初速"。它一变（按下/松开加速键、或改了参数），
+    // 就把当前速度直接切过去，避免靠加速度慢慢爬。
+    double lastInit = 0.0;
+
+    // 连续多少帧"要求移动但光标没动"。用来判断注入是不是被系统挡住了。
+    int blockedTicks = 0;
+
     TickTimer timer;
     if (timer.coarse) timeBeginPeriod(1);   // 老系统：普通定时器精度不够
 
     while (isRunning) {
         // 先跑一次看门狗：把因漏掉 keyup 而卡住的状态复位，
         // 否则下面会拿着旧状态继续移动光标。
-        WatchdogKeyStates();
+        // 传入"注入是否被挡"——只有确实推不动光标时才清状态，
+        // 避免把"按住多个键、只有最后一个在重复"误判成松开。
+        WatchdogKeyStates(blockedTicks >= 3);
 
         // ---------- 组合键 / 总开关 ----------
         bool pressed = IsSwitchPressed();
@@ -1348,6 +1368,7 @@ void MouseControlThread() {
             MouseLeftUp();
             MouseRightUp();
             MouseMiddleUp();
+            blockedTicks = 0;   // 本帧不动，不参与"被挡"判定
             timer.Wait(TICK_MS.load());
             continue;
         }
@@ -1357,6 +1378,7 @@ void MouseControlThread() {
             MouseLeftUp();
             MouseRightUp();
             MouseMiddleUp();
+            blockedTicks = 0;
             timer.Wait(TICK_MS.load());
             continue;
         }
@@ -1376,33 +1398,62 @@ void MouseControlThread() {
         // 用 SetCursorPos 而不是 SendInput：SetCursorPos 是精确设置位置，
         // 在 Windows 下不会被 Clipping 等机制干扰，对"移动"意图更直接。
         //
-        // 加速模型：
-        //   刚按下   → 从 MOVE_SPEED 起步
-        //   一直按住 → 每个 tick 加 MOVE_ACCEL，涨到 MOVE_MAX_SPEED 封顶
-        //   松开     → 下一帧重新从起步速度开始
-        //   拐弯     → 方向一变（反向、转向、加/减一个方向键）也回到起步速度
+        // 速度模型（四个参数都可带小数）：
+        //   初始速度 → 起步速度，符号决定方向（负 = 反向，0 = 静止起步）
+        //   加速度   → 每 tick 的变化量；负值就是减速，减到区间下界停住
+        //   上限     → 比初速大时是天花板，比初速小时当下限用（速度不低于它）
+        //   倍率     → 按住加速键时初速/加速度同乘、上限乘它的绝对值；
+        //              负值会翻转方向，0 = 刹车
+        // 起步 / 拐弯回到初速；负加速度不会把速度带过 0 去调头。
         // 位移可能带小数，但 SetCursorPos 只收整数，所以用 accX/accY 存余量。
         int dirX = (f ? 1 : 0) - (s ? 1 : 0);   // 右正、左负
         int dirY = (d ? 1 : 0) - (e ? 1 : 0);   // 下正、上负
 
         if (dirX != 0 || dirY != 0) {
-            double mul  = keyBoostDown.load() ? (double)SPEED_MULTIPLIER.load() : 1.0;
+            double mul  = keyBoostDown.load() ? SPEED_MULTIPLIER.load() : 1.0;
             double init = MOVE_SPEED.load()     * mul;
-            double mx   = MOVE_MAX_SPEED.load() * mul;
+            // 上限是"大小"，倍率取绝对值：mul 为负只翻转方向，不该把上限也变负
+            double cap  = MOVE_MAX_SPEED.load() * fabs(mul);
             double acc  = MOVE_ACCEL.load()     * mul;
-            if (mx < init) mx = init;   // 上限比初速还小时以初速为准
+
+            // 上限有两种角色：
+            //   上限 ≥ |初速| → 天花板，速度夹在 [0, 上限]
+            //   上限 <  |初速| → 地板，  速度夹在 [上限, |初速|]
+            // 这样"上限填得比初速小"时不会把初速压掉，手感退化回旧规则。
+            double lo = 0.0, hi = cap;
+            if (cap < fabs(init)) {
+                lo = cap;
+                hi = fabs(init);
+            }
+
+            // 有效初速变了（按下/松开加速键、改了参数）→ 直接切到新初速。
+            // 不切的话，负倍率翻转方向时会被夹断清零、松开刹车后也爬不起来。
+            if (init != lastInit) {
+                moveSpeedNow = init;
+                lastInit = init;
+            }
 
             // 拐弯判定：只要方向和上一帧不同就算 —— 包括 180° 反向、90° 转向，
             // 以及斜走时多按/少按一个方向键。
             // 上一帧没在动（lastDir 全是 0）时不算拐弯，那是"起步"。
             bool turned = (lastDirX != 0 || lastDirY != 0) &&
                           (dirX != lastDirX || dirY != lastDirY);
+            bool justStarted = (lastDirX == 0 && lastDirY == 0);
 
-            if (turned || moveSpeedNow < init) {
+            if (justStarted || turned) {
                 moveSpeedNow = init;        // 起步 / 拐弯：回到初速
             } else {
                 moveSpeedNow += acc;
-                if (moveSpeedNow > mx) moveSpeedNow = mx;
+
+                // 按初速的方向把速度夹进 [lo, hi]。
+                // 区间本身就挡住了"调头"，所以不再需要单独的零穿越判断。
+                if (init >= 0) {
+                    if (moveSpeedNow < lo) moveSpeedNow = lo;
+                    if (moveSpeedNow > hi) moveSpeedNow = hi;
+                } else {
+                    if (moveSpeedNow > -lo) moveSpeedNow = -lo;
+                    if (moveSpeedNow < -hi) moveSpeedNow = -hi;
+                }
             }
 
             if (e) accY -= moveSpeedNow;
@@ -1416,6 +1467,17 @@ void MouseControlThread() {
             int dy = (int)accY;  accY -= dy;
 
             SetCursorPos(pt.x + dx, pt.y + dy);
+
+            // 注入是否生效：要求移动了、但位置没变，说明被系统挡住了
+            // （高权限窗口在前台、安全桌面等）。连续几帧这样就判定"被挡"。
+            if (dx != 0 || dy != 0) {
+                POINT after;
+                GetCursorPos(&after);
+                if (after.x == pt.x && after.y == pt.y) blockedTicks++;
+                else blockedTicks = 0;
+            }
+        } else {
+            blockedTicks = 0;   // 没在移动，无从判断
         }
 
         lastDirX = dirX;
@@ -1632,6 +1694,132 @@ void QuitApp(HWND hwnd) {
         // IDNO：不保存，直接往下走
     }
     DestroyWindow(hwnd);
+}
+
+// ==================== 数字输入过滤 ====================
+// 四个小数框只需要"数字 + 一个小数点"，带符号的还允许开头的负号。
+// 不加过滤的话字母、汉字都能打进去，虽然应用时会被判非法回退，
+// 但输入过程很别扭。做法：子类化编辑框，插入的字符统一走清洗函数；
+// 粘贴走的是 WM_PASTE，单独接管。
+static WNDPROC g_oldEditProc = NULL;   // 编辑框原始窗口过程（四个框共用同一个）
+
+// 该框是否允许负号。创建时用 SetProp 打标记，避免给每个框写一份窗口过程。
+static bool EditAllowsNegative(HWND edit) {
+    return GetPropA(edit, "numedit_signed") != NULL;
+}
+
+// 把任意文本清洗成合法数字串：
+//   负号：只保留开头的一个（前面不能已经有数字）
+//   小数点：只保留第一个
+//   其它字符：全部丢弃
+static std::string SanitizeNumber(const char* src, bool allowNegative) {
+    std::string out;
+    bool hasDot = false, hasNeg = false;
+
+    for (const char* p = src; p && *p; p++) {
+        const char c = *p;
+        if (c >= '0' && c <= '9') {
+            out += c;
+        } else if (c == '.' && !hasDot) {
+            out += c;
+            hasDot = true;
+        } else if (c == '-' && allowNegative && !hasNeg && out.empty()) {
+            out += c;
+            hasNeg = true;
+        }
+    }
+    return out;
+}
+
+// 清洗编辑框当前内容；有变化就把光标放回末尾。只给"粘贴"用。
+static void SanitizeEditText(HWND edit) {
+    char buf[128] = {};
+    GetWindowTextA(edit, buf, sizeof(buf));
+
+    std::string clean = SanitizeNumber(buf, EditAllowsNegative(edit));
+    if (clean == buf) return;
+
+    SetWindowTextA(edit, clean.c_str());
+    const int len = (int)clean.size();
+    SendMessageA(edit, EM_SETSEL, (WPARAM)len, (LPARAM)len);
+}
+
+// 判断某个字符能不能插进去：先算出"插入后会变成什么"，
+// 再要求这段文本本身就是合法的数字串。
+// 这样就不需要在字符已经插进去之后重写文本框——重写会把光标顶到末尾，
+// 而且在 WM_CHAR 里改文本容易把编辑框的内部插入状态搞乱。
+static bool IsNumberCharAllowed(HWND edit, wchar_t ch) {
+    if (ch >= '0' && ch <= '9') return true;        // 数字永远可以
+    if (ch != '.' && ch != '-') return false;       // 其它字符一律拒绝
+    if (ch == '-' && !EditAllowsNegative(edit)) return false;
+
+    char cur[128] = {};
+    GetWindowTextA(edit, cur, sizeof(cur));
+
+    // 有选区时，插入会替换选区，所以要按"替换后"的文本判断
+    DWORD selStart = 0, selEnd = 0;
+    SendMessageA(edit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+
+    std::string next = std::string(cur).substr(0, selStart);
+    next += (char)ch;
+    next += std::string(cur).substr(selEnd);
+
+    return SanitizeNumber(next.c_str(), EditAllowsNegative(edit)) == next;
+}
+
+// 编辑框子类过程
+static LRESULT CALLBACK NumberEditProc(HWND edit, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == WM_CHAR) {
+        // 控制字符（退格、Tab、回车）直接放行；
+        // 可打印字符先判断能不能插，不能插就直接吞掉，文本一个字都不改。
+        if ((wchar_t)wParam < 32)
+            return CallWindowProcA(g_oldEditProc, edit, uMsg, wParam, lParam);
+        if (!IsNumberCharAllowed(edit, (wchar_t)wParam))
+            return 0;
+        return CallWindowProcA(g_oldEditProc, edit, uMsg, wParam, lParam);
+    } else if (uMsg == WM_PASTE) {
+        // 取剪贴板文本，清洗后替换选区，避免整段非法字符被粘进来
+        std::string raw;
+        if (OpenClipboard(edit)) {
+            HANDLE h = GetClipboardData(CF_TEXT);
+            if (h) {
+                const char* p = (const char*)GlobalLock(h);
+                if (p) raw = p;
+                GlobalUnlock(h);
+            }
+            CloseClipboard();
+        }
+
+        std::string clean = SanitizeNumber(raw.c_str(), EditAllowsNegative(edit));
+        if (!clean.empty()) {   // 清洗后为空就当作没粘，别把选区删掉
+            SendMessageA(edit, EM_REPLACESEL, TRUE, (LPARAM)clean.c_str());
+            SanitizeEditText(edit);   // 替换后可能和原有内容拼出两个小数点
+        }
+        return 0;
+    }
+    return CallWindowProcA(g_oldEditProc, edit, uMsg, wParam, lParam);
+}
+
+// 把四个小数框挂上过滤过程。signedOk 表示该框是否允许负号。
+static void AttachNumberFilters(HWND mainWnd) {
+    struct { int id; bool signedOk; } fields[] = {
+        { ID_EDIT_SPEED,     true  },
+        { ID_EDIT_ACCEL,     true  },
+        { ID_EDIT_MAXSPEED,  false },   // 上限是"大小"，不接受负号
+        { ID_EDIT_SPEED_MUL, true  },
+    };
+
+    for (int i = 0; i < 4; i++) {
+        HWND edit = GetDlgItem(mainWnd, fields[i].id);
+        if (!edit) continue;
+
+        // 四个框同属 EDIT 类，原始过程相同，只记一次即可
+        WNDPROC prev = (WNDPROC)SetWindowLongPtrA(edit, GWLP_WNDPROC, (LONG_PTR)NumberEditProc);
+        if (!g_oldEditProc) g_oldEditProc = prev;
+
+        if (fields[i].signedOk)
+            SetPropA(edit, "numedit_signed", (HANDLE)(INT_PTR)1);
+    }
 }
 
 // ==================== 窗口过程 ====================
@@ -1894,6 +2082,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 按钮文字只在映射真正改变时刷新（捕获 / 清空 / 重置 / 加载），
             // 不再靠 500ms 定时器兜底：那些原子量是本进程私有的，外部改不到，
             // 而每条改动路径都已经主动刷过一次。
+
+            // 所有控件和初值都就位后再挂输入过滤，避免加载存档时被拦
+            AttachNumberFilters(hwnd);
             break;
         }
 
