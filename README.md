@@ -1,3 +1,12 @@
+## 编译
+
+```powershell
+g++ -std=c++11 -O2 -s -mwindows -static -pthread -fexec-charset=GBK KeyboardCursor.cpp -o KeyboardCursor.exe -lwinmm -lgdi32 -luser32 -lshell32
+```
+
+# 这个介绍过期了
+
+
 # 🖱️ 光标控制程序 / Cursor Control Program
 
 一个轻量的键盘驱动鼠标控制工具：绑定按键即可移动光标、点击和滚动滚轮，并通过组合键一键启用/禁用控制。
