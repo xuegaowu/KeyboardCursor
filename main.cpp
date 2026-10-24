@@ -168,6 +168,25 @@ std::atomic<bool> keyBoostDown(false);
 // 所以由钩子自己记一份按下/松开，供 IsKeyDown 判定组合键使用。
 std::atomic<bool> capsDown(false);
 
+// ==================== 按键心跳 ====================
+// 每个"由钩子自己维护状态"的键，记录最后一次 keydown 的时间。
+// 按住键时系统会持续产生重复 keydown，时间戳会不断刷新；
+// 一旦标记还是"按下"、时间戳却很久没更新，就说明 keyup 丢了
+// （典型场景：切到任务管理器这类高权限窗口，UIPI 让钩子收不到事件），
+// 看门狗据此把状态强制复位，避免光标一直走。
+enum KeySlot {
+    SLOT_UP, SLOT_DOWN, SLOT_LEFT, SLOT_RIGHT,
+    SLOT_LCLICK, SLOT_RCLICK, SLOT_MCLICK,
+    SLOT_WHEELUP, SLOT_WHEELDOWN, SLOT_BOOST, SLOT_CAPS,
+    SLOT_COUNT
+};
+std::atomic<DWORD> g_lastKeyDown[SLOT_COUNT];
+
+// 启动时清零：atomic 的默认构造不保证初始化值，必须显式写一遍。
+void InitKeyTimers() {
+    for (int i = 0; i < SLOT_COUNT; i++) g_lastKeyDown[i] = 0;
+}
+
 // 鼠标三键"当前是否处于按下状态"，用于幂等判断（同状态不重发）。
 // 与控制线程配合，避免每帧重复发送 DOWN/UP 事件。
 std::atomic<bool> mouseLeftDown(false);
@@ -938,18 +957,43 @@ bool ShouldIntercept(DWORD vkCode) {
 // ==================== 记录按键状态 ====================
 // 由钩子线程调用，把"某个物理键按下/松开"翻译成"某个功能触发/停止"。
 // 名字里的 keyE / keyD 是老命名，实际含义是"上移功能触发"/"下移功能触发"。
+// 按下时顺手记录时间戳，供看门狗判断这个键的 keyup 是不是丢了。
 void SetKeyState(DWORD vkCode, bool down) {
-    if (vkCode == keyUp.load()) keyE = down;
-    else if (vkCode == keyDown.load()) keyD = down;
-    else if (vkCode == keyLeft.load()) keyS = down;
-    else if (vkCode == keyRight.load()) keyF = down;
-    else if (vkCode == keyLClick.load()) keyJ = down;
-    else if (vkCode == keyRClick.load()) keyK = down;
-    else if (vkCode == keyWheelUp.load()) keyO = down;
-    else if (vkCode == keyWheelDown.load()) keyL = down;
-    else if (vkCode == keyMClick.load()) keyM = down;
+    const DWORD now = down ? GetTickCount() : 0;
+
+    if (vkCode == keyUp.load()) {
+        keyE = down;
+        if (down) g_lastKeyDown[SLOT_UP] = now;
+    } else if (vkCode == keyDown.load()) {
+        keyD = down;
+        if (down) g_lastKeyDown[SLOT_DOWN] = now;
+    } else if (vkCode == keyLeft.load()) {
+        keyS = down;
+        if (down) g_lastKeyDown[SLOT_LEFT] = now;
+    } else if (vkCode == keyRight.load()) {
+        keyF = down;
+        if (down) g_lastKeyDown[SLOT_RIGHT] = now;
+    } else if (vkCode == keyLClick.load()) {
+        keyJ = down;
+        if (down) g_lastKeyDown[SLOT_LCLICK] = now;
+    } else if (vkCode == keyRClick.load()) {
+        keyK = down;
+        if (down) g_lastKeyDown[SLOT_RCLICK] = now;
+    } else if (vkCode == keyWheelUp.load()) {
+        keyO = down;
+        if (down) g_lastKeyDown[SLOT_WHEELUP] = now;
+    } else if (vkCode == keyWheelDown.load()) {
+        keyL = down;
+        if (down) g_lastKeyDown[SLOT_WHEELDOWN] = now;
+    } else if (vkCode == keyMClick.load()) {
+        keyM = down;
+        if (down) g_lastKeyDown[SLOT_MCLICK] = now;
+    }
     // 加速键只被"加速倍率"逻辑读取，键位可配置（默认 Shift）。
-    else if (vkCode == keyBoost.load()) keyBoostDown = down;
+    else if (vkCode == keyBoost.load()) {
+        keyBoostDown = down;
+        if (down) g_lastKeyDown[SLOT_BOOST] = now;
+    }
 }
 
 // ==================== 键盘钩子 ====================
@@ -992,7 +1036,10 @@ LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
             SetKeyState(vk, true);
             // 先记 CapsLock 的按下状态，再决定要不要吞 ——
             // 一旦被吞，系统就不会再更新它，只能靠这里自己维护。
-            if (vk == VK_CAPITAL) capsDown = true;
+            if (vk == VK_CAPITAL) {
+                capsDown = true;
+                g_lastKeyDown[SLOT_CAPS] = GetTickCount();   // 喂看门狗
+            }
             if (ShouldIntercept(vk)) return 1;
         } else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
             // 松开也要同步状态 + 视情况拦截，否则被吞的键会一直"按着"。
@@ -1182,6 +1229,60 @@ void UpdateTitleState() {
     }
 }
 
+// 这些键按住时不会产生自动重复，不能靠"多久没收到 keydown"来判断松开。
+bool IsNonRepeatingKey(int vk) {
+    switch (vk) {
+        case VK_SHIFT: case VK_CONTROL: case VK_MENU:
+        case VK_LWIN: case VK_RWIN:
+        case VK_CAPITAL: case VK_NUMLOCK: case VK_SCROLL:
+        case VK_SNAPSHOT: case VK_PAUSE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// 判断某个"标记为按下"的键，实际上是不是已经松开了。
+//   - 没被我们的钩子拦截的键：系统状态是真实的，直接问 GetAsyncKeyState，
+//     这样 Shift 这类不重复的修饰键也能准确判断。
+//   - 被拦截的键：系统里读不到，只能靠自动重复的时间戳兜底。
+bool KeyLooksReleased(int vk, DWORD lastDown) {
+    if (!ShouldIntercept((DWORD)vk)) {
+        return (GetAsyncKeyState(vk) & 0x8000) == 0;
+    }
+    const DWORD limit = IsNonRepeatingKey(vk) ? 5000 : 1200;
+    return (GetTickCount() - lastDown) > limit;
+}
+
+// ==================== 按键看门狗 ====================
+// 兜底：如果某个键的 keyup 丢了（切到任务管理器这类高权限窗口、锁屏、
+// 钩子被系统摘掉），标记会一直停在"按下"，光标就会自己走。
+// 每个 tick 在驱动鼠标之前先跑一遍，把这类残留状态清掉。
+void WatchdogKeyStates() {
+    if (keyE.load() && KeyLooksReleased(keyUp.load(), g_lastKeyDown[SLOT_UP].load()))
+        keyE = false;
+    if (keyD.load() && KeyLooksReleased(keyDown.load(), g_lastKeyDown[SLOT_DOWN].load()))
+        keyD = false;
+    if (keyS.load() && KeyLooksReleased(keyLeft.load(), g_lastKeyDown[SLOT_LEFT].load()))
+        keyS = false;
+    if (keyF.load() && KeyLooksReleased(keyRight.load(), g_lastKeyDown[SLOT_RIGHT].load()))
+        keyF = false;
+    if (keyJ.load() && KeyLooksReleased(keyLClick.load(), g_lastKeyDown[SLOT_LCLICK].load()))
+        keyJ = false;
+    if (keyK.load() && KeyLooksReleased(keyRClick.load(), g_lastKeyDown[SLOT_RCLICK].load()))
+        keyK = false;
+    if (keyM.load() && KeyLooksReleased(keyMClick.load(), g_lastKeyDown[SLOT_MCLICK].load()))
+        keyM = false;
+    if (keyO.load() && KeyLooksReleased(keyWheelUp.load(), g_lastKeyDown[SLOT_WHEELUP].load()))
+        keyO = false;
+    if (keyL.load() && KeyLooksReleased(keyWheelDown.load(), g_lastKeyDown[SLOT_WHEELDOWN].load()))
+        keyL = false;
+    if (keyBoostDown.load() && KeyLooksReleased(keyBoost.load(), g_lastKeyDown[SLOT_BOOST].load()))
+        keyBoostDown = false;
+    if (capsDown.load() && KeyLooksReleased(VK_CAPITAL, g_lastKeyDown[SLOT_CAPS].load()))
+        capsDown = false;
+}
+
 // ==================== 鼠标控制线程 ====================
 // 按 TICK_MS 节拍轮询原子标志，驱动鼠标；所有输出都是"事件注入"或"位置设置"。
 void MouseControlThread() {
@@ -1200,6 +1301,10 @@ void MouseControlThread() {
     if (timer.coarse) timeBeginPeriod(1);   // 老系统：普通定时器精度不够
 
     while (isRunning) {
+        // 先跑一次看门狗：把因漏掉 keyup 而卡住的状态复位，
+        // 否则下面会拿着旧状态继续移动光标。
+        WatchdogKeyStates();
+
         // ---------- 组合键 / 总开关 ----------
         bool pressed = IsSwitchPressed();
         bool holdMode = (switchHoldMode.load() != 0);
@@ -2245,6 +2350,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
         CloseHandle(hMutex);
         return 0;
     }
+
+    // 看门狗用的时间戳必须在使用前清零：atomic 的默认构造不保证初始化，
+    // 不清的话可能一开始就误判成"很久没按键"，把状态乱清。
+    InitKeyTimers();
 
     // 存档目录必须在创建窗口之前定下来：WM_CREATE 里就要扫描目录、读 save0.ini。
     // 不可写时这里会询问用户是否回退，拒绝则进入只读模式（程序照常运行）。
