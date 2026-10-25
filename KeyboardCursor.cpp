@@ -39,7 +39,12 @@
 #include <cmath>
 // 多媒体库：仅用于老系统兜底时的 timeBeginPeriod(1)。
 #include <mmsystem.h>
+// 通用控件库：只用 tooltip（TOOLTIPS_CLASS / TOOLINFO），
+// 中文界面也该有悬停解释，不止英文需要。
+#include <commctrl.h>
 #pragma comment(lib, "winmm.lib")
+// MinGW 不会自动链接 comctl32，编译命令里要加 -lcomctl32。
+#pragma comment(lib, "comctl32.lib")
 // 注册表 API（RegOpenKeyExA / RegSetValueExA）在 advapi32 里。
 // MSVC 需要这行；MinGW 默认就链接 advapi32，写了也会被忽略。
 #pragma comment(lib, "advapi32.lib")
@@ -54,6 +59,182 @@
 #endif
 
 using namespace std::chrono;
+
+// ==================== 多语言字符串表 ====================
+// 所有界面文字集中到一张 X 宏表里，再由它生成"枚举 + 每种语言一张数组"。
+// 这样枚举和数组的内容来自同一份数据，不可能出现"加了一条中文忘了加英文"
+// 导致下标错位的问题（那种错位不会报编译错误，只会显示出完全无关的文字）。
+//
+// 用 ID 而不是"按中文原文查表"：同一个词在不同语境下英文不一样
+// （"开关"作分组名要译 Switches，作动词是另一个词），按原文查迟早撞车。
+//
+// 注意：源码是 UTF-8 + BOM，编译时 -fexec-charset=GBK 会把字面量转成 GBK。
+// 所以这里**不能写 GBK 里没有的字符**（西语的 ñ、波兰语的 ł 等会直接编译报错），
+// 那种语言必须走外部文件 + 运行时转码的路线。
+#define LANG_TABLE(X)                                                          \
+    X(APP_TITLE,        "光标控制", "Keyboard Cursor")                          \
+    X(TITLE_ON,         "[启用]",   "[On]")                                     \
+    X(TITLE_OFF,        "[禁用]",   "[Off]")                                    \
+    X(TRAY_SHOW,        "显示窗口", "Show window")                              \
+    X(TRAY_EXIT,        "退出",     "Exit")                                     \
+    X(ERR_HOOK,         "键盘钩子安装失败！", "Failed to install the keyboard hook.") \
+    /* ---- 顶部开关组 ---- */                                                  \
+    X(GRP_SWITCH,       "开关",                 "Switches")                     \
+    X(CHK_INTERCEPT,    "启用按键拦截",         "Intercept keys")               \
+    X(CHK_TRAY,         "关闭时最小化到托盘",   "Minimize to tray")             \
+    X(CHK_AUTOSTART,    "开机自启动",           "Auto start")                   \
+    /* ---- 速度组 ---- */                                                      \
+    X(GRP_SPEED,        "速度",             "Speed")                            \
+    X(LBL_SPEED,        "初始速度:",        "Start speed:")                     \
+    X(LBL_ACCEL,        "加速度:",          "Acceleration:")                    \
+    X(LBL_MAXSPEED,     "速度上限:",        "Max speed:")                       \
+    X(LBL_MUL,          "加速倍率:",        "Boost factor:")                    \
+    X(LBL_WIVL,         "滚轮间隔(ms):",    "Wheel interval(ms):")              \
+    X(LBL_WSPD,         "滚轮速度:",        "Wheel speed:")                     \
+    X(LBL_WMUL,         "滚轮加速:",        "Wheel boost:")                     \
+    X(LBL_TICK,         "刷新间隔(ms):",    "Refresh(ms):")                     \
+    /* ---- 8 个数值框的悬停解释 ---- */                                        \
+    X(TIP_SPEED,        "按下方向键后第一拍移动的像素数",                       \
+                        "Pixels moved on the first tick after pressing a direction key") \
+    X(TIP_ACCEL,        "每拍增加多少速度，0 表示不加速",                       \
+                        "Speed added per tick. 0 means no acceleration")        \
+    X(TIP_MAXSPEED,     "速度加速到这里为止；比初始速度小时改作下限用",         \
+                        "Acceleration stops here. If lower than the start speed it becomes the minimum") \
+    X(TIP_MUL,          "按住加速键时速度乘这个值，可以小于 1（减速）",         \
+                        "Multiplier applied while the boost key is held. Below 1 slows down") \
+    X(TIP_WIVL,         "两次滚轮事件之间的最小间隔",                           \
+                        "Minimum gap between two wheel events")                 \
+    X(TIP_WSPD,         "一次滚轮事件滚多少行",                                 \
+                        "How many lines one wheel event scrolls")               \
+    X(TIP_WMUL,         "按住滚轮加速键时滚轮乘这个值，单次最多 3000 行",       \
+                        "Multiplier while the wheel-boost key is held. Capped at 3000 lines per event") \
+    X(TIP_TICK,         "控制线程多久醒一次（越小越跟手、越费 CPU）。速度的单位是“每拍”",  \
+                        "How often the control loop wakes. Smaller is smoother but uses more CPU") \
+    /* ---- 按键映射组 ---- */                                                  \
+    X(GRP_KEYS,         "按键映射",     "Key mapping")                          \
+    X(LBL_UP,           "上:",          "Up:")                                  \
+    X(LBL_DOWN,         "下:",          "Down:")                                \
+    X(LBL_LEFT,         "左:",          "Left:")                                \
+    X(LBL_RIGHT,        "右:",          "Right:")                               \
+    X(LBL_LCLICK,       "左键:",        "L-Click:")                             \
+    X(LBL_RCLICK,       "右键:",        "R-Click:")                             \
+    X(LBL_MCLICK,       "中键:",        "M-Click:")                             \
+    X(LBL_WUP,          "上滚:",        "Wheel up:")                            \
+    X(LBL_WDOWN,        "下滚:",        "Wheel down:")                          \
+    X(LBL_BOOST,        "加速:",        "Boost:")                               \
+    X(LBL_WBOOST,       "滚轮加速:",    "Wheel boost:")                         \
+    X(NONE,             "无",           "(none)")                               \
+    X(WAITING_KEY,      "按任意键...",  "Press a key...")                       \
+    /* ---- 组合键组 ---- */                                                    \
+    X(GRP_COMBO,        "开关组合键（1~4 个键同时按下）",                       \
+                        "Combo key (hold 1-4 keys)")                            \
+    X(CLEAR_ALL,        "清空全部",     "Clear all")                            \
+    X(RADIO_TOGGLE,     "按下切换（按一下开、再按一下关）",                     \
+                        "Toggle (press to switch)")                             \
+    X(RADIO_HOLD,       "按住生效（按下开、松开关）",                           \
+                        "Hold (press = on, release = off)")                     \
+    X(HOTKEY_HINT,      "重置快捷键：Esc + 0", "Reset hotkey: Esc + 0")         \
+    /* ---- 存档组 ---- */                                                      \
+    X(GRP_SAVE,         "存档",         "Saves")                                \
+    X(BTN_SAVE,         "保存",         "Save")                                 \
+    X(BTN_LOAD,         "加载",         "Load")                                 \
+    X(BTN_APPLY,        "应用",         "Apply")                                \
+    X(BTN_RESET,        "重置",         "Reset")                                \
+    X(BTN_EXIT,         "退出程序",     "Exit")                                 \
+    /* ---- 状态行 ---- */                                                      \
+    X(ST_LOAD_FAILED_BAK, "存档读取失败，已使用默认值；原文件将在下次保存前备份为 .bak。", \
+                          "Failed to read the save file; defaults loaded. The old file will be backed up as .bak.") \
+    X(ST_READONLY,      "只读模式：程序目录不可写且未启用回退，设置不会保存。",  \
+                        "Read-only: the program folder is not writable and no fallback is enabled") \
+    X(ST_DIR_FALLBACK,  "存档目录（程序目录不可写，已改用用户目录）：",         \
+                        "Save folder (program folder not writable, using user folder): ") \
+    X(ST_DIR,           "存档目录：",   "Save folder: ")                        \
+    X(ST_APPLIED_RO,    "已应用（只读模式，未写入磁盘）",                       \
+                        "Applied (read-only, nothing written)")                 \
+    X(ST_APPLIED_SAVE0, "已应用，并写入默认存档 save0",                         \
+                        "Applied and written to save0")                         \
+    X(ST_APPLIED_FAIL,  "已应用，但写入 save0 失败",                            \
+                        "Applied, but writing save0 failed")                    \
+    X(ST_SAVED,         "已保存：",     "Saved: ")                              \
+    X(ST_SAVE_FAIL,     "保存失败：无法写入存档目录。",                         \
+                        "Save failed: the save folder is not writable")         \
+    X(ST_LOADED,        "已加载：",     "Loaded: ")                             \
+    X(ST_LOADED_FAIL_SAVE0, "（但写入 save0 失败）",                            \
+                        " (but writing save0 failed)")                          \
+    X(ST_NEW_SAVE,      "已新建存档：", "New save created: ")                   \
+    X(ST_RESET,         "已重置为出厂默认并立即生效（未保存）",                 \
+                        "Reset to defaults and applied (not saved)")            \
+    /* ---- 消息框 ---- */                                                      \
+    X(MB_DIR_HEAD,      "程序所在目录不可写，无法在 exe 旁保存存档。\n\n",      \
+                        "The program folder is not writable, so saves cannot be stored next to the exe.\n\n") \
+    X(MB_DIR_ASK,       "是否改为保存到：\n",                                   \
+                        "Save to the following folder instead?\n")              \
+    X(MB_DIR_NO,        "\n\n选择“否”将以只读模式继续运行：\n可以正常使用映射，但设置不会被保存。", \
+                        "\n\nChoosing No runs in read-only mode: mapping still works, but settings are not saved.") \
+    X(MB_AUTOSTART_FAIL, "无法修改开机自启动设置（注册表写入失败）。",          \
+                        "Could not change the auto-start setting (registry write failed)") \
+    X(MB_READONLY_SAVE, "当前为只读模式，设置无法保存。",                       \
+                        "Read-only mode: settings cannot be saved")             \
+    X(MB_SAVE_FAIL,     "保存失败：无法写入存档目录。",                         \
+                        "Save failed: the save folder is not writable")         \
+    X(MB_NO_SAVE_FILE,  "存档文件不存在。", "The save file does not exist")     \
+    X(MB_LOAD_FAIL,     "存档读取失败，已使用默认值。",                         \
+                        "Failed to read the save file; defaults loaded")        \
+    X(MB_READONLY_NEW,  "只读模式下无法新建存档。",                             \
+                        "Cannot create a save in read-only mode")               \
+    X(MB_SAVE_FULL,     "存档编号已用尽（save1~save999）。",                    \
+                        "No free save slot left (save1-save999)")               \
+    X(MB_NEW_FAIL,      "新建存档失败：无法写入存档目录。",                     \
+                        "Failed to create the save: the folder is not writable") \
+    X(MB_KEY_CONFLICT,  "该键已被另一种用途占用，请换一个键。",                 \
+                        "This key is already used by another function. Pick another one") \
+    X(MB_QUIT_SAVE,     "设置已修改但还没保存，退出前保存吗？",                 \
+                        "Settings changed but not saved. Save before exiting?") \
+    X(MB_QUIT_SAVE_FAIL, "保存失败，已取消退出。请检查存档目录后重试。",        \
+                        "Save failed, exit cancelled. Check the save folder and try again") \
+    X(MB_RESTART,       "切换语言需要重新启动程序才会生效。\n\n现在重启吗？",   \
+                        "The language change takes effect after a restart.\n\nRestart now?") \
+    X(MB_LANG_RO,       "只读模式下无法保存语言设置。",                         \
+                        "Language cannot be saved in read-only mode")           \
+    X(MB_RESTART_FAIL,  "自动重启失败，请手动重新打开程序。",                   \
+                        "Failed to restart automatically. Please reopen the program.") \
+    /* ---- 消息框标题 ---- */                                                  \
+    X(TIP_TITLE,        "提示",         "Info")                                 \
+    X(ERR_TITLE,        "错误",         "Error")                                \
+    X(CONFLICT_TITLE,   "按键冲突",     "Key conflict")                         \
+    X(QUIT_TITLE,       "退出",         "Exit")                                 \
+    X(DIR_TITLE,        "存档目录",     "Save folder")                          \
+    X(LANG_TITLE,       "语言",         "Language")                             \
+    /* ---- 按键名（只翻中文的那几个；字母/数字/F1 保持原样） ---- */           \
+    X(KEY_LEFT,         "左方向",       "Left")                                 \
+    X(KEY_RIGHT,        "右方向",       "Right")                                \
+    X(KEY_UP,           "上方向",       "Up")                                   \
+    X(KEY_DOWN,         "下方向",       "Down")
+
+enum StrId {
+#define LANG_ENUM(id, zh, en) S_##id,
+    LANG_TABLE(LANG_ENUM)
+#undef LANG_ENUM
+    S_COUNT
+};
+
+static const char* const kLangZh[S_COUNT] = {
+#define LANG_ZH(id, zh, en) zh,
+    LANG_TABLE(LANG_ZH)
+#undef LANG_ZH
+};
+
+static const char* const kLangEn[S_COUNT] = {
+#define LANG_EN(id, zh, en) en,
+    LANG_TABLE(LANG_EN)
+#undef LANG_EN
+};
+
+// 当前语言表。默认中文；启动时 LoadLanguage() 会按 config.ini 换掉。
+static const char* const* g_langTable = kLangZh;
+static std::string g_langCode = "zh-CN";   // 写回 ini 用的语言标识
+
+inline const char* T(StrId id) { return g_langTable[id]; }
 
 // 控制线程的刷新间隔（毫秒），界面上可改（"刷新间隔(ms)"）。
 // 取值原则：略高于目标显示器刷新周期。6ms ≈ 167Hz，覆盖 144/165Hz。
@@ -119,6 +300,7 @@ namespace Limit {
 
 // 存档控件 ID
 #define ID_COMBO_SAVE           3061   // 存档下拉框
+#define ID_COMBO_LANG           3064   // 语言下拉框（右上角）
 #define ID_BTN_SAVE             3062   // 保存
 #define ID_BTN_LOAD             3063   // 加载
 #define ID_STATIC_STATUS        3051   // 底部状态提示（存档目录 / 只读 / 读取失败）
@@ -290,12 +472,15 @@ ConfigDraft g_draft = {};        // 界面当前展示的草稿值
 bool g_dirty = false;            // 草稿和磁盘不一致（有没保存的修改）
 bool g_updatingUI = false;       // 正在程序化刷新控件，用来屏蔽误触发的 EN_CHANGE
 bool g_shuttingDown = false;     // 系统正在关机/注销，跳过"是否保存"的询问
+// 切换语言后要求"保存设置 + 重新启动自己"。真正拉起新进程放在 WinMain 末尾，
+// 必须等钩子卸掉、控制线程停掉之后 —— 否则新旧两个实例会同时注入鼠标键盘。
+bool g_restartRequested = false;
 
 // ==================== 按键名称转换 ====================
 // 把虚拟键码翻译成 UI 上显示的文字。
 // 常见键手写名字（保证中文界面统一），其余交给系统翻译，最后兜底显示键码。
 std::string GetKeyName(int vk) {
-    if (vk == 0) return "无";
+    if (vk == 0) return T(S_NONE);
     if (vk >= 'A' && vk <= 'Z') return std::string(1, (char)vk);
     if (vk >= '0' && vk <= '9') return std::string(1, (char)vk);
     switch (vk) {
@@ -313,10 +498,10 @@ std::string GetKeyName(int vk) {
         case VK_END: return "End";
         case VK_PRIOR: return "PageUp";
         case VK_NEXT: return "PageDown";
-        case VK_LEFT: return "左方向";
-        case VK_RIGHT: return "右方向";
-        case VK_UP: return "上方向";
-        case VK_DOWN: return "下方向";
+        case VK_LEFT: return T(S_KEY_LEFT);
+        case VK_RIGHT: return T(S_KEY_RIGHT);
+        case VK_UP: return T(S_KEY_UP);
+        case VK_DOWN: return T(S_KEY_DOWN);
         case VK_F1: return "F1";
         case VK_F2: return "F2";
         case VK_F3: return "F3";
@@ -401,19 +586,40 @@ std::string GetExeDir() {
     return (pos == std::string::npos) ? std::string(".") : exePath.substr(0, pos);
 }
 
-// 获取 save/ 目录路径
-// 固定策略：与 exe 同目录下的 save/ 子目录，与 exe 是否在系统盘无关。
-// 这样拷到 U 盘也能"带着存档走"。
+// 获取 data\ 目录：所有"程序自己的外部文件"都放在这里
+// （存档、config.ini、以后的语言包）。放在 exe 旁边，
+// 这样拷到 U 盘也能带着配置和存档走。
+std::string GetDataDir() {
+    return GetExeDir() + "\\data";
+}
+
+// 存档目录：data 下的 save 子目录。
 std::string GetSaveDir() {
-    return GetExeDir() + "\\save";
+    return GetDataDir() + "\\save";
+}
+
+// 程序级配置文件（语言等）。它不属于任何存档槽 ——
+// 放进 save0.ini 的话，加载别的存档会把界面语言一起换掉。
+std::string g_configPath;
+
+// 逐级创建目录。CreateDirectoryA 只能建最后一层，而 data\save 需要先有 data。
+// 从盘符开始一段一段往上建，中间已存在的会被拒绝（ERROR_ALREADY_EXISTS），
+// 那不算失败，所以统一忽略返回值，最后用属性判断到底有没有。
+void MakeDirs(const std::string& path) {
+    for (size_t i = 1; i <= path.size(); i++) {
+        if (i == path.size() || path[i] == '\\')
+            CreateDirectoryA(path.substr(0, i).c_str(), NULL);
+    }
 }
 
 // 确保目录存在且真的能写
-// CreateDirectory 成功不等于可写（只读介质、组策略、杀毒软件都可能拦），
+// 建目录成功不等于可写（只读介质、组策略、杀毒软件都可能拦），
 // 所以实际写一个临时文件来验证，写完立刻删掉。
 bool EnsureDirWritable(const std::string& dir) {
-    if (!CreateDirectoryA(dir.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
-        return false;
+    MakeDirs(dir);
+
+    // 逐级创建后对象可能仍然不存在（路径非法、只读介质），先确认存在。
+    if (GetFileAttributesA(dir.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
     std::string probe = dir + "\\.write_test";
     HANDLE h = CreateFileA(probe.c_str(), GENERIC_WRITE, 0, NULL,
@@ -424,19 +630,22 @@ bool EnsureDirWritable(const std::string& dir) {
     return true;
 }
 
-// 用户目录下的备选存档路径：%LOCALAPPDATA%\KeyboardCursor\save
+// 用户目录下的备选存档路径：%LOCALAPPDATA%\KeyboardCursor\data\save
 // 放在用户配置目录里，普通权限即可写，不受 Program Files 的只读限制。
-std::string GetLocalSaveDir() {
+std::string GetLocalDataDir() {
     // 用 getenv 而不是 MSVC 专有的 _dupenv_s，这样 GCC / MSVC 都能编。
     // getenv 返回的是 CRT 内部缓冲区，调用方不能也不该 free。
     const char* p = getenv("LOCALAPPDATA");
-    std::string base = (p != nullptr) ? p : "";
-    if (base.empty()) return GetSaveDir();   // 极端情况退回原目录
-    return base + "\\KeyboardCursor\\save";
+    if (p == nullptr || *p == '\0') return GetDataDir();   // 极端情况退回原目录
+    return std::string(p) + "\\KeyboardCursor\\data";
+}
+
+std::string GetLocalSaveDir() {
+    return GetLocalDataDir() + "\\save";
 }
 
 // 决定最终使用的存档目录
-//   1) exe\save 可写        → 正常模式
+//   1) exe\data\save 可写   → 正常模式
 //   2) 不可写，用户同意回退  → %LOCALAPPDATA% 下的目录
 //   3) 不可写，用户不同意    → 只读模式（程序照常运行，只是不写盘）
 // 这一步必须在创建窗口之前完成：WM_CREATE 里就要扫描目录、读 save0.ini，
@@ -446,25 +655,69 @@ void ResolveSaveDir() {
     if (EnsureDirWritable(exeSave)) {
         g_saveDir = exeSave;
         g_saveWritable = true;
+        // exe 旁边能写，配置就放这里（LoadLanguage 可能因为上次是只读模式
+        // 而指向了用户目录，这里纠正回来）。
+        g_configPath = GetDataDir() + "\\config.ini";
         return;
     }
 
     std::string localSave = GetLocalSaveDir();
-    std::string msg = "程序所在目录不可写，无法在 exe 旁保存存档。\n\n"
-                      "是否改为保存到：\n" + localSave + "\n\n"
-                      "选择“否”将以只读模式继续运行：\n"
-                      "可以正常使用映射，但设置不会被保存。";
-    if (MessageBoxA(NULL, msg.c_str(), "存档目录",
+    std::string msg = std::string(T(S_MB_DIR_HEAD)) + T(S_MB_DIR_ASK) +
+                      localSave + T(S_MB_DIR_NO);
+    if (MessageBoxA(NULL, msg.c_str(), T(S_DIR_TITLE),
                     MB_YESNO | MB_ICONQUESTION) == IDYES
         && EnsureDirWritable(localSave)) {
         g_saveDir = localSave;
         g_saveWritable = true;
         g_saveDirFallback = true;
+        // 配置也要跟着走：exe 旁边既然写不了，config.ini 留在那里就会
+        // "语言设置保存失败"，而存档却一切正常，很费解。
+        g_configPath = GetLocalDataDir() + "\\config.ini";
     } else {
         // 用户拒绝回退，或回退目标也写不了：降级为只读，不退出程序。
         g_saveDir = exeSave;
         g_saveWritable = false;
     }
+}
+
+// ==================== 语言设置 ====================
+// 语言是"程序级"设置，存在 data\config.ini，不属于任何存档槽。
+// 必须在创建窗口之前读出来：控件标题在建窗时就要用对应语言的文字，
+// 所以不能像其它设置那样等到 WM_CREATE 里再读。
+void LoadLanguage() {
+    const std::string exeCfg  = GetDataDir()      + "\\config.ini";
+    const std::string userCfg = GetLocalDataDir() + "\\config.ini";
+
+    char buf[32] = {};
+    g_configPath = exeCfg;
+    GetPrivateProfileStringA("UI", "language", "", buf, sizeof(buf), exeCfg.c_str());
+
+    // exe 旁边没写过（或不可读）时再找用户目录 —— 那种情况下
+    // ResolveSaveDir 会把存档放到用户目录，配置也该跟着去同一个地方。
+    if (buf[0] == '\0') {
+        GetPrivateProfileStringA("UI", "language", "zh-CN", buf, sizeof(buf),
+                                 userCfg.c_str());
+        g_configPath = userCfg;
+    }
+
+    // 目前只认两种：标识以 en 开头就当英文，其余一律回退中文。
+    // 以后接外部语言包时，这里改成"拿标识去匹配 lang\*.ini"。
+    const bool isEnglish = (buf[0] == 'e' || buf[0] == 'E') &&
+                           (buf[1] == 'n' || buf[1] == 'N');
+    if (isEnglish) {
+        g_langTable = kLangEn;
+        g_langCode  = "en";
+    } else {
+        g_langTable = kLangZh;
+        g_langCode  = "zh-CN";
+    }
+}
+
+// 写回语言设置。返回 false 表示写不进去（只读模式 / 目录不可写）。
+bool SaveLanguage(const std::string& code) {
+    if (!g_saveWritable) return false;
+    return WritePrivateProfileStringA("UI", "language", code.c_str(),
+                                      g_configPath.c_str()) != 0;
 }
 
 // 检查文件是否存在
@@ -1363,8 +1616,8 @@ private:
 void UpdateTitleState() {
     HWND hwnd = FindWindowA("MyClass", NULL);
     if (hwnd != NULL) {
-        std::string title = "光标控制 ";
-        title += isEnabled.load() ? "[启用]" : "[禁用]";
+        std::string title = std::string(T(S_APP_TITLE)) + " ";
+        title += isEnabled.load() ? T(S_TITLE_ON) : T(S_TITLE_OFF);
         SetWindowTextA(hwnd, title.c_str());
     }
 }
@@ -1690,7 +1943,7 @@ void AddTrayIcon(HWND hwnd) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_APP + 1;   // 托盘事件一律以这个消息通知窗口
     g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-    strcpy_s(g_nid.szTip, "光标控制");
+    strcpy_s(g_nid.szTip, T(S_APP_TITLE));
     Shell_NotifyIconA(NIM_ADD, &g_nid);
 }
 
@@ -1841,16 +2094,16 @@ bool DoSave(HWND hwnd, const std::string& slot) {
 void QuitApp(HWND hwnd) {
     if (!g_shuttingDown && g_dirty && g_saveWritable) {
         int r = MessageBoxA(hwnd,
-            "设置已修改但还没保存，退出前保存吗？",
-            "退出", MB_YESNOCANCEL | MB_ICONQUESTION);
+            T(S_MB_QUIT_SAVE),
+            T(S_QUIT_TITLE), MB_YESNOCANCEL | MB_ICONQUESTION);
 
         if (r == IDCANCEL) return;          // 取消：留在窗口继续编辑
         if (r == IDYES) {
             std::string slot = GetSelectedSlot(hwnd);
             if (!DoSave(hwnd, slot)) {
                 // 存失败就别退，否则改动直接丢了
-                MessageBoxA(hwnd, "保存失败，已取消退出。请检查存档目录后重试。",
-                            "错误", MB_OK | MB_ICONERROR);
+                MessageBoxA(hwnd, T(S_MB_QUIT_SAVE_FAIL),
+                            T(S_ERR_TITLE), MB_OK | MB_ICONERROR);
                 return;
             }
         }
@@ -1985,47 +2238,163 @@ static void AttachNumberFilters(HWND mainWnd) {
     }
 }
 
+// ==================== 字体与测宽 ====================
+// 布局不再写死宽度，而是"量出当前语言的文字宽度再排"。
+// 前提：控件渲染用的字体和 TextWidth() 量的字体必须是同一个，
+// 否则量出来的宽度和实际显示对不上，长文字照样会被截断。
+static HFONT g_uiFont = NULL;
+
+// 量一段文字在当前界面字体下的像素宽度。
+int TextWidth(const char* s) {
+    if (s == NULL || *s == '\0') return 0;
+
+    // 复用一个内存 DC：每次量都 CreateCompatibleDC 太浪费。
+    static HDC hdc = NULL;
+    if (hdc == NULL) hdc = CreateCompatibleDC(NULL);
+
+    HGDIOBJ old = SelectObject(hdc, g_uiFont ? g_uiFont
+                                             : GetStockObject(DEFAULT_GUI_FONT));
+    SIZE sz = { 0, 0 };
+    GetTextExtentPoint32A(hdc, s, (int)strlen(s), &sz);
+    SelectObject(hdc, old);
+    return sz.cx;
+}
+
+// 给所有子控件统一字体。EnumChildWindows 的回调。
+static BOOL CALLBACK SetFontProc(HWND child, LPARAM lp) {
+    SendMessage(child, WM_SETFONT, (WPARAM)lp, TRUE);
+    return TRUE;
+}
+
+// ==================== 悬停提示 ====================
+// 8 个数值框的标签太短（英文尤其），说不清"单位是什么"，
+// 所以每个框挂一条 tooltip。整个程序共用一个 tooltip 窗口。
+static HWND g_hTooltip = NULL;
+
+void AddTooltip(HWND parent, HWND ctrl, const std::string& text) {
+    if (g_hTooltip == NULL) {
+        g_hTooltip = CreateWindowExA(WS_EX_TOPMOST, TOOLTIPS_CLASSA, NULL,
+            WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            parent, NULL, NULL, NULL);
+        if (g_hTooltip == NULL) return;   // 建不出来就静默降级，不影响主功能
+    }
+
+    TOOLINFOA ti = {};
+    ti.cbSize   = sizeof(ti);
+    ti.uFlags   = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd     = parent;
+    ti.uId      = (UINT_PTR)ctrl;
+    ti.lpszText = (LPSTR)text.c_str();   // TTM_ADDTOOL 会自己拷贝一份
+    SendMessageA(g_hTooltip, TTM_ADDTOOLA, 0, (LPARAM)&ti);
+}
+
 // ==================== 窗口过程 ====================
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_CREATE: {
-            // ==================== 布局参数 ====================
-            // 改成绝对坐标 + 分组框的排版，不再靠 y 逐行累加：
-            //   外距 M=12，左右两栏各 292 宽，栏间距 8，行距 28，控件高 24。
-            // 窗口大小在 WinMain 里定死（640×620），这里不处理 WM_SIZE，
-            // 所以拉动窗口边缘时控件不会跟着走 —— 这是已知限制，不是 bug。
+            // ==================== 布局参数（按文字实测） ====================
+            // 不再写死宽度：所有尺寸都由"当前语言下最长的那个字"推出来，
+            // 中文窄、英文宽、以后更长的语言（德语等）也自动适配。
+            // 仍然不处理 WM_SIZE —— 窗口尺寸在函数末尾一次性算好并设定，之后固定，
+            // 所以去掉了可拖动边框，免得用户拉大后控件全挤在左上角。
             g_hMainWnd = hwnd;
 
-            const int M     = 12;             // 外边距
-            const int colW  = 292;            // 每栏宽度
-            const int col2  = M + colW + 8;   // 右栏起点 = 312
-            const int ctlH  = 24;             // 控件高度
-            const int wideW = 592;            // 跨两栏的宽度
+            const int M    = 12;   // 外边距
+            const int gap  = 8;    // 两栏之间的间距
+            const int ctlH = 24;   // 控件高度
+
+            // 控件和 TextWidth 必须用同一份字体：两边不一致的话，
+            // 量出来的宽度和实际渲染对不上，长文字照样会被截断。
+            if (!g_uiFont) g_uiFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+            const int editW = 72;   // 数值框宽度，够放 "-1000"
+
+            // ---- 左栏：8 条标签取最长的一条，统一宽度 ----
+            const StrId kSpeedLabels[8] = {
+                S_LBL_SPEED, S_LBL_ACCEL, S_LBL_MAXSPEED, S_LBL_MUL,
+                S_LBL_WIVL,  S_LBL_WSPD,  S_LBL_WMUL,     S_LBL_TICK
+            };
+            int lblSpeedW = 0;
+            for (int i = 0; i < 8; i++)
+                lblSpeedW = std::max(lblSpeedW, TextWidth(T(kSpeedLabels[i])));
+            lblSpeedW += 8;
+
+            // ---- 右栏：11 条标签取最长的一条 ----
+            const StrId kKeyLabels[11] = {
+                S_LBL_UP,    S_LBL_DOWN,  S_LBL_LEFT,  S_LBL_RIGHT,
+                S_LBL_LCLICK, S_LBL_RCLICK, S_LBL_MCLICK,
+                S_LBL_WUP,   S_LBL_WDOWN, S_LBL_BOOST, S_LBL_WBOOST
+            };
+            int lblKeyW = 0;
+            for (int i = 0; i < 11; i++)
+                lblKeyW = std::max(lblKeyW, TextWidth(T(kKeyLabels[i])));
+            lblKeyW += 8;
+
+            // 按键按钮要放得下最长的键名：用户可能把某个键设成 Backspace。
+            // 按最长键名预留，切换映射后按钮宽度也不会变，不会出现文字被截。
+            const int btnW = std::max(76, TextWidth("Backspace") + 14);
+
+            const int pad       = 12;                       // 栏内左右边距
+            const int keyColW   = lblKeyW + 4 + btnW;       // 右栏一组"标签 + 按钮"
+            const int needLeft  = pad + lblSpeedW + 6 + editW + pad;
+            const int needRight = pad + keyColW + 12 + keyColW + pad;
+            int colW = std::max(needLeft, needRight);
+
+            // ---- 顶部一行：3 个复选框 + 语言下拉，宽度也实测 ----
+            const int chkW1 = TextWidth(T(S_CHK_INTERCEPT)) + 30;
+            const int chkW2 = TextWidth(T(S_CHK_TRAY))      + 30;
+            const int chkW3 = TextWidth(T(S_CHK_AUTOSTART)) + 30;
+            const int langW = 150;   // 语言下拉框
+            const int needTop = pad + chkW1 + 14 + chkW2 + 14 + chkW3 + 24 + langW + pad;
+
+            // ---- 底部一行：快捷键提示 + 3 个按钮（右对齐） ----
+            const int bigBtnW = std::max(80, std::max(TextWidth(T(S_BTN_APPLY)),
+                                        std::max(TextWidth(T(S_BTN_EXIT)),
+                                                 TextWidth(T(S_BTN_RESET)))) + 24);
+            const int needBottom = pad + TextWidth(T(S_HOTKEY_HINT)) + 20 +
+                                   3 * (bigBtnW + 8) + pad;
+
+            // 客户区宽度 = 四行里最宽的那个。
+            // 上限取屏幕宽度的 90%：以后换成德语这种长文字时，宁可让标签省略，
+            // 也不能把窗口撑到屏幕外面去。
+            int clientW = std::max(2 * colW + gap + 2 * M,
+                                   std::max(needTop, needBottom));
+            const int maxClientW = (int)(GetSystemMetrics(SM_CXSCREEN) * 0.9);
+            if (clientW > maxClientW) clientW = maxClientW;
+
+            // 多出来的宽度平分给两栏，避免右边缘留一条空白
+            colW = (clientW - 2 * M - gap) / 2;
+            const int wideW = colW * 2 + gap;
+            const int col2  = M + colW + gap;
+            clientW = wideW + 2 * M;
 
             // ---------- 顶部：开关 ----------
-            // 和下面的"速度""按键映射"一样用分组框，视觉上属于同一套分区，
-            // 不再让三个复选框裸放在窗口最上面。
+            // 和下面的"速度""按键映射"一样用分组框，视觉上属于同一套分区。
             // 组高 58：标题占 22，复选框在 34 处，底部再留 12 的余量。
-            CreateWindowA("BUTTON", "开关",
+            CreateWindowA("BUTTON", T(S_GRP_SWITCH),
                 WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
                 M, M, wideW, 58, hwnd, NULL, NULL, NULL);
 
             const int chkY = M + 22;   // 复选框在组内的 y
+            int cx = M + 12;
 
-            CreateWindowA("BUTTON", "启用按键拦截",
+            CreateWindowA("BUTTON", T(S_CHK_INTERCEPT),
                 WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                M + 12, chkY, 150, ctlH, hwnd, (HMENU)ID_CHECK_INTERCEPT, NULL, NULL);
+                cx, chkY, chkW1, ctlH, hwnd, (HMENU)ID_CHECK_INTERCEPT, NULL, NULL);
             CheckDlgButton(hwnd, ID_CHECK_INTERCEPT, BST_CHECKED);
+            cx += chkW1 + 14;
 
-            CreateWindowA("BUTTON", "关闭时最小化到托盘",
+            CreateWindowA("BUTTON", T(S_CHK_TRAY),
                 WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                M + 174, chkY, 180, ctlH, hwnd, (HMENU)ID_CHECK_TRAY, NULL, NULL);
+                cx, chkY, chkW2, ctlH, hwnd, (HMENU)ID_CHECK_TRAY, NULL, NULL);
+            cx += chkW2 + 14;
 
             // 开机自启动：勾选状态直接读注册表，不经过 ini，
             // 避免"ini 里存的是开、注册表里实际没写"这种两处状态打架。
-            CreateWindowA("BUTTON", "开机自启动",
+            CreateWindowA("BUTTON", T(S_CHK_AUTOSTART),
                 WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
-                M + 366, chkY, 130, ctlH, hwnd, (HMENU)ID_CHECK_AUTOSTART, NULL, NULL);
+                cx, chkY, chkW3, ctlH, hwnd, (HMENU)ID_CHECK_AUTOSTART, NULL, NULL);
             // 初始状态按"有效状态"来：Run 值存在、且没被系统禁用。
             RefreshAutoStartCheck(hwnd);
             if (IsAutoStartEnabled()) {
@@ -2034,68 +2403,54 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 SetAutoStart(true);
             }
 
+            // 语言下拉框：放在右上角。选项用各语言自己的写法，不翻译 ——
+            // 界面已经是英文时，用户还得能认出"简体中文"才能切回去。
+            {
+                HWND hLang = CreateWindowA("COMBOBOX", "",
+                    WS_VISIBLE | WS_CHILD | WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
+                    M + wideW - 12 - langW, chkY, langW, 120,
+                    hwnd, (HMENU)ID_COMBO_LANG, NULL, NULL);
+                SendMessageA(hLang, CB_ADDSTRING, 0, (LPARAM)"CN 简体中文");
+                SendMessageA(hLang, CB_ADDSTRING, 0, (LPARAM)"EN English");
+                SendMessageA(hLang, CB_SETCURSEL,
+                             (g_langTable == kLangEn) ? 1 : 0, 0);
+            }
+
             // ---------- 左栏：速度 ----------
             // BS_GROUPBOX 只是画个框和标题，里面的控件仍然是主窗口的子窗口，
             // 所以坐标必须写绝对位置；先创建分组框，控件才会画在它上面。
             // 组高 256：8 行，最后一行在 302 处（302+22=324），底部留 10 的余量。
-            CreateWindowA("BUTTON", "速度",
+            CreateWindowA("BUTTON", T(S_GRP_SPEED),
                 WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
                 M, 78, colW, 256, hwnd, NULL, NULL, NULL);
 
-            const int sx = M + 12;    // 组内左边距
-            const int vx = M + 108;   // 数值框的 x
+            const int sx = M + 12;             // 组内左边距
+            const int vx = sx + lblSpeedW + 6;  // 数值框的 x：标签右边 + 6
 
-            // 初始速度：刚按下那一帧走多少像素。允许小数，所以不加 ES_NUMBER。
-            CreateWindowA("STATIC", "初始速度:",
-                WS_VISIBLE | WS_CHILD, sx, 106 + 3, 90, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("EDIT", "1.5",
-                WS_VISIBLE | WS_CHILD | WS_BORDER,
-                vx, 106, 64, 22, hwnd, (HMENU)ID_EDIT_SPEED, NULL, NULL);
+            // 8 行的结构完全一样，用 lambda 收口，避免复制 8 遍。
+            // 标签用 SS_RIGHT 右对齐：各语言标签长短不一，右对齐后
+            // 全都贴着输入框，视觉上整齐；左边缘参差反而不显眼。
+            auto addNumRow = [&](int y, StrId label, int editId, const char* init,
+                                 bool intOnly, StrId tip) {
+                CreateWindowA("STATIC", T(label),
+                    WS_VISIBLE | WS_CHILD | SS_RIGHT,
+                    sx, y + 3, lblSpeedW, 18, hwnd, NULL, NULL, NULL);
+                HWND ed = CreateWindowA("EDIT", init,
+                    WS_VISIBLE | WS_CHILD | WS_BORDER | (intOnly ? ES_NUMBER : 0),
+                    vx, y, editW, 22, hwnd, (HMENU)(INT_PTR)editId, NULL, NULL);
+                // 悬停解释：标签本身太短（特别在英文下），说不清单位是什么，
+                // 所以每个数值框都挂一条 tooltip。
+                AddTooltip(hwnd, ed, std::string(T(label)) + "\n" + T(tip));
+            };
 
-            // 加速度：每个 tick 让速度增加多少（px/tick²）。0 = 不加速。
-            CreateWindowA("STATIC", "加速度:",
-                WS_VISIBLE | WS_CHILD, sx, 134 + 3, 90, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("EDIT", "0.02",
-                WS_VISIBLE | WS_CHILD | WS_BORDER,
-                vx, 134, 64, 22, hwnd, (HMENU)ID_EDIT_ACCEL, NULL, NULL);
-
-            // 速度上限：加速到这个值就不再涨；比初速还小时按初速处理。
-            CreateWindowA("STATIC", "速度上限:",
-                WS_VISIBLE | WS_CHILD, sx, 162 + 3, 90, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("EDIT", "5",
-                WS_VISIBLE | WS_CHILD | WS_BORDER,
-                vx, 162, 64, 22, hwnd, (HMENU)ID_EDIT_MAXSPEED, NULL, NULL);
-
-            CreateWindowA("STATIC", "加速倍率:",
-                WS_VISIBLE | WS_CHILD, sx, 190 + 3, 90, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("EDIT", "3",
-                WS_VISIBLE | WS_CHILD | WS_BORDER,
-                vx, 190, 64, 22, hwnd, (HMENU)ID_EDIT_SPEED_MUL, NULL, NULL);
-
-            CreateWindowA("STATIC", "滚轮间隔(ms):",
-                WS_VISIBLE | WS_CHILD, sx, 218 + 3, 96, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("EDIT", "80",
-                WS_VISIBLE | WS_CHILD | WS_BORDER | ES_NUMBER,
-                vx, 218, 64, 22, hwnd, (HMENU)ID_EDIT_WHEEL_INTERVAL, NULL, NULL);
-
-            CreateWindowA("STATIC", "滚轮速度:",
-                WS_VISIBLE | WS_CHILD, sx, 246 + 3, 90, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("EDIT", "1",
-                WS_VISIBLE | WS_CHILD | WS_BORDER | ES_NUMBER,
-                vx, 246, 64, 22, hwnd, (HMENU)ID_EDIT_WHEEL_SPEED, NULL, NULL);
-
-            CreateWindowA("STATIC", "滚轮加速:",
-                WS_VISIBLE | WS_CHILD, sx, 274 + 3, 90, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("EDIT", "3",
-                WS_VISIBLE | WS_CHILD | WS_BORDER | ES_NUMBER,
-                vx, 274, 64, 22, hwnd, (HMENU)ID_EDIT_WHEEL_MUL, NULL, NULL);
-
-            // 刷新间隔：控制线程多久醒一次。数值越小越跟手、CPU 唤醒越频繁。
-            CreateWindowA("STATIC", "刷新间隔(ms):",
-                WS_VISIBLE | WS_CHILD, sx, 302 + 3, 96, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("EDIT", "6",
-                WS_VISIBLE | WS_CHILD | WS_BORDER | ES_NUMBER,
-                vx, 302, 64, 22, hwnd, (HMENU)ID_EDIT_TICK, NULL, NULL);
+            addNumRow(106, S_LBL_SPEED,    ID_EDIT_SPEED,          "1.5",  false, S_TIP_SPEED);
+            addNumRow(134, S_LBL_ACCEL,    ID_EDIT_ACCEL,          "0.02", false, S_TIP_ACCEL);
+            addNumRow(162, S_LBL_MAXSPEED, ID_EDIT_MAXSPEED,       "5",    false, S_TIP_MAXSPEED);
+            addNumRow(190, S_LBL_MUL,      ID_EDIT_SPEED_MUL,      "3",    false, S_TIP_MUL);
+            addNumRow(218, S_LBL_WIVL,     ID_EDIT_WHEEL_INTERVAL, "80",   true,  S_TIP_WIVL);
+            addNumRow(246, S_LBL_WSPD,     ID_EDIT_WHEEL_SPEED,    "1",    true,  S_TIP_WSPD);
+            addNumRow(274, S_LBL_WMUL,     ID_EDIT_WHEEL_MUL,      "3",    true,  S_TIP_WMUL);
+            addNumRow(302, S_LBL_TICK,     ID_EDIT_TICK,           "6",    true,  S_TIP_TICK);
 
             // 应用 / 重置都是全量操作：它们推进的是整份草稿
             // （速度/加速度/上限 + 移动加速倍率 + 滚轮 3 项 + 刷新间隔
@@ -2103,79 +2458,85 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 所以不放在本组里，统一挪到窗口底部。
 
             // ---------- 右栏：按键映射 ----------
-            CreateWindowA("BUTTON", "按键映射",
+            CreateWindowA("BUTTON", T(S_GRP_KEYS),
                 WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
                 col2, 78, colW, 256, hwnd, NULL, NULL, NULL);
 
-            // 组内排两列，每列「标签 44 + 按键按钮 76」。
-            const int kx1 = col2 + 12;           // 第一列标签 x
-            const int kx2 = col2 + 12 + 136;     // 第二列标签 x
-            const int bw  = 76;                  // 按键按钮宽
+            // 组内两列，每列「标签 lblKeyW + 按键按钮 btnW」。
+            // kx2 由第一列的实际宽度推出，标签变长时不会互相压到。
+            const int kx1 = col2 + 12;
+            const int kx2 = kx1 + keyColW + 12;
 
-            // 11 个映射/加速键的创建逻辑完全一样，用 lambda 收口，避免复制 11 遍。
-            // 按钮初始文字取当前映射值，和 UpdateAllButtonText 的结果一致。
-            auto addKeyRow = [&](int x, int y, const char* label, int btnId, int vk) {
-                CreateWindowA("STATIC", label,
-                    WS_VISIBLE | WS_CHILD, x, y + 3, 44, 18, hwnd, NULL, NULL, NULL);
+            // 11 行结构完全一样，用 lambda 收口，避免复制 11 遍。
+            // 标签右对齐，和左栏一致。
+            auto addKeyRow = [&](int x, int y, StrId label, int btnId, int vk) {
+                CreateWindowA("STATIC", T(label),
+                    WS_VISIBLE | WS_CHILD | SS_RIGHT,
+                    x, y + 3, lblKeyW, 18, hwnd, NULL, NULL, NULL);
                 CreateWindowA("BUTTON", GetKeyName(vk).c_str(),
-                    WS_VISIBLE | WS_CHILD, x + 46, y, bw, ctlH,
+                    WS_VISIBLE | WS_CHILD,
+                    x + lblKeyW + 4, y, btnW, ctlH,
                     hwnd, (HMENU)(INT_PTR)btnId, NULL, NULL);
             };
 
-            addKeyRow(kx1, 106, "上:",   ID_BTN_KEY_UP,        keyUp.load());
-            addKeyRow(kx2, 106, "下:",   ID_BTN_KEY_DOWN,      keyDown.load());
-            addKeyRow(kx1, 134, "左:",   ID_BTN_KEY_LEFT,      keyLeft.load());
-            addKeyRow(kx2, 134, "右:",   ID_BTN_KEY_RIGHT,     keyRight.load());
-            addKeyRow(kx1, 162, "左键:", ID_BTN_KEY_LCLICK,    keyLClick.load());
-            addKeyRow(kx2, 162, "右键:", ID_BTN_KEY_RCLICK,    keyRClick.load());
-            // 最后两行：滚轮上下放一起，中键和加速键放一起
-            addKeyRow(kx1, 190, "上滚:", ID_BTN_KEY_WHEELUP,   keyWheelUp.load());
-            addKeyRow(kx2, 190, "下滚:", ID_BTN_KEY_WHEELDOWN, keyWheelDown.load());
-            addKeyRow(kx1, 218, "中键:", ID_BTN_KEY_MCLICK,    keyMClick.load());
+            addKeyRow(kx1, 106, S_LBL_UP,     ID_BTN_KEY_UP,        keyUp.load());
+            addKeyRow(kx2, 106, S_LBL_DOWN,   ID_BTN_KEY_DOWN,      keyDown.load());
+            addKeyRow(kx1, 134, S_LBL_LEFT,   ID_BTN_KEY_LEFT,      keyLeft.load());
+            addKeyRow(kx2, 134, S_LBL_RIGHT,  ID_BTN_KEY_RIGHT,     keyRight.load());
+            addKeyRow(kx1, 162, S_LBL_LCLICK, ID_BTN_KEY_LCLICK,    keyLClick.load());
+            addKeyRow(kx2, 162, S_LBL_RCLICK, ID_BTN_KEY_RCLICK,    keyRClick.load());
+            // 滚轮上下放一起，中键和加速键放一起
+            addKeyRow(kx1, 190, S_LBL_WUP,    ID_BTN_KEY_WHEELUP,   keyWheelUp.load());
+            addKeyRow(kx2, 190, S_LBL_WDOWN,  ID_BTN_KEY_WHEELDOWN, keyWheelDown.load());
+            addKeyRow(kx1, 218, S_LBL_MCLICK, ID_BTN_KEY_MCLICK,    keyMClick.load());
             // 加速键：按住它只影响"移动速度"，不再管滚轮（滚轮有自己的键）
-            addKeyRow(kx2, 218, "加速:", ID_BTN_KEY_BOOST,     keyBoost.load());
-
-            // 滚轮加速键：按住时滚轮档位乘"滚轮加速"。
-            // 标签是 4 个字 + 冒号，addKeyRow 固定的 44px 会被截断，
-            // 所以这一行单独创建：标签 76px，按钮从 +80 开始。
-            // 该行只有这一个控件，第二列是空的，因此可以放心超过
-            // 其它行"第一列只占 136px"的限制（80+76=156，仍远小于组宽 292）。
-            CreateWindowA("STATIC", "滚轮加速:",
-                WS_VISIBLE | WS_CHILD, kx1, 246 + 3, 76, 18, hwnd, NULL, NULL, NULL);
-            CreateWindowA("BUTTON", GetKeyName(keyWheelBoost.load()).c_str(),
-                WS_VISIBLE | WS_CHILD, kx1 + 80, 246, bw, ctlH,
-                hwnd, (HMENU)(INT_PTR)ID_BTN_KEY_WHEELBOOST, NULL, NULL);
+            addKeyRow(kx2, 218, S_LBL_BOOST,  ID_BTN_KEY_BOOST,     keyBoost.load());
+            // 滚轮加速键：单独占一行（右栏第 6 行）
+            addKeyRow(kx1, 246, S_LBL_WBOOST, ID_BTN_KEY_WHEELBOOST, keyWheelBoost.load());
 
             // ---------- 开关组合键：跨两栏一整条 ----------
             // 高度 96：第一行 4 个槽位 + 清空，第二行两个模式单选按钮。
-            CreateWindowA("BUTTON", "开关组合键（1~4 个键同时按下）",
+            CreateWindowA("BUTTON", T(S_GRP_COMBO),
                 WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
                 M, 342, wideW, 96, hwnd, NULL, NULL, NULL);
 
-            CreateWindowA("BUTTON", "CapsLock",
-                WS_VISIBLE | WS_CHILD, M + 12,  364, 70, ctlH, hwnd, (HMENU)ID_BTN_SWITCH1, NULL, NULL);
-            CreateWindowA("BUTTON", "无",
-                WS_VISIBLE | WS_CHILD, M + 90,  364, 70, ctlH, hwnd, (HMENU)ID_BTN_SWITCH2, NULL, NULL);
-            CreateWindowA("BUTTON", "无",
-                WS_VISIBLE | WS_CHILD, M + 168, 364, 70, ctlH, hwnd, (HMENU)ID_BTN_SWITCH3, NULL, NULL);
-            CreateWindowA("BUTTON", "无",
-                WS_VISIBLE | WS_CHILD, M + 246, 364, 70, ctlH, hwnd, (HMENU)ID_BTN_SWITCH4, NULL, NULL);
+            // 槽位宽度按最长的可能键名预留，四个并排 + 间距
+            const int slotW = std::max(80, TextWidth("CapsLock") + 24);
+            int slotX = M + 12;
+            CreateWindowA("BUTTON", T(S_NONE),
+                WS_VISIBLE | WS_CHILD, slotX, 364, slotW, ctlH, hwnd, (HMENU)ID_BTN_SWITCH1, NULL, NULL);
+            slotX += slotW + 8;
+            CreateWindowA("BUTTON", T(S_NONE),
+                WS_VISIBLE | WS_CHILD, slotX, 364, slotW, ctlH, hwnd, (HMENU)ID_BTN_SWITCH2, NULL, NULL);
+            slotX += slotW + 8;
+            CreateWindowA("BUTTON", T(S_NONE),
+                WS_VISIBLE | WS_CHILD, slotX, 364, slotW, ctlH, hwnd, (HMENU)ID_BTN_SWITCH3, NULL, NULL);
+            slotX += slotW + 8;
+            CreateWindowA("BUTTON", T(S_NONE),
+                WS_VISIBLE | WS_CHILD, slotX, 364, slotW, ctlH, hwnd, (HMENU)ID_BTN_SWITCH4, NULL, NULL);
+
             // 清空按钮推到最右，和四个槽位拉开距离，防误点。
-            CreateWindowA("BUTTON", "清空全部",
-                WS_VISIBLE | WS_CHILD, M + 468, 364, 100, ctlH, hwnd, (HMENU)ID_BTN_CLEAR_SWITCH, NULL, NULL);
+            const int clearW = TextWidth(T(S_CLEAR_ALL)) + 28;
+            CreateWindowA("BUTTON", T(S_CLEAR_ALL),
+                WS_VISIBLE | WS_CHILD, M + wideW - 12 - clearW, 364, clearW, ctlH,
+                hwnd, (HMENU)ID_BTN_CLEAR_SWITCH, NULL, NULL);
 
             // 组合键的生效方式：二选一。
             // WS_GROUP 标在第一个上，把这两个单选按钮圈成一组，
             // 否则它们会和窗口里其它单选按钮（目前没有）互相干扰。
-            CreateWindowA("BUTTON", "按下切换（按一下开、再按一下关）",
+            // 宽度按文字实测：英文比中文长不少，写死 250 会截断。
+            const int radioW1 = TextWidth(T(S_RADIO_TOGGLE)) + 28;
+            const int radioW2 = TextWidth(T(S_RADIO_HOLD)) + 28;
+            CreateWindowA("BUTTON", T(S_RADIO_TOGGLE),
                 WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP,
-                M + 12, 398, 250, ctlH, hwnd, (HMENU)ID_RADIO_SWITCH_TOGGLE, NULL, NULL);
-            CreateWindowA("BUTTON", "按住生效（按下开、松开关）",
+                M + 12, 398, radioW1, ctlH, hwnd, (HMENU)ID_RADIO_SWITCH_TOGGLE, NULL, NULL);
+            CreateWindowA("BUTTON", T(S_RADIO_HOLD),
                 WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON,
-                M + 274, 398, 220, ctlH, hwnd, (HMENU)ID_RADIO_SWITCH_HOLD, NULL, NULL);
+                M + 12 + radioW1 + 12, 398, radioW2, ctlH,
+                hwnd, (HMENU)ID_RADIO_SWITCH_HOLD, NULL, NULL);
 
-            // ---------- 存档：从右侧栏挪到底部，变成一条横向工具栏 ----------
-            CreateWindowA("BUTTON", "存档",
+            // ---------- 存档：底部横向工具栏 ----------
+            CreateWindowA("BUTTON", T(S_GRP_SAVE),
                 WS_VISIBLE | WS_CHILD | BS_GROUPBOX,
                 M, 446, wideW, 86, hwnd, NULL, NULL, NULL);
 
@@ -2183,14 +2544,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 高度参数 200 是"收起高度 + 展开后列表高度"的总和，实际列表约 176px
             // （约 8 行）。超过就自动出竖向滚动条，不会无限往下长；
             // WS_VSCROLL 显式写上是为了让这个意图在代码里一眼可见。
+            const int saveComboW = 240;
             CreateWindowA("COMBOBOX", "",
                 WS_VISIBLE | WS_CHILD | WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
-                M + 12, 468, 200, 200, hwnd, (HMENU)ID_COMBO_SAVE, NULL, NULL);
+                M + 12, 468, saveComboW, 200, hwnd, (HMENU)ID_COMBO_SAVE, NULL, NULL);
 
-            CreateWindowA("BUTTON", "保存",
-                WS_VISIBLE | WS_CHILD, M + 224, 468, 80, ctlH, hwnd, (HMENU)ID_BTN_SAVE, NULL, NULL);
-            CreateWindowA("BUTTON", "加载",
-                WS_VISIBLE | WS_CHILD, M + 312, 468, 80, ctlH, hwnd, (HMENU)ID_BTN_LOAD, NULL, NULL);
+            const int smBtnW = std::max(80, TextWidth(T(S_BTN_LOAD)) + 24);
+            const int smBtnX = M + 12 + saveComboW + 12;
+            CreateWindowA("BUTTON", T(S_BTN_SAVE),
+                WS_VISIBLE | WS_CHILD, smBtnX, 468, smBtnW, ctlH,
+                hwnd, (HMENU)ID_BTN_SAVE, NULL, NULL);
+            CreateWindowA("BUTTON", T(S_BTN_LOAD),
+                WS_VISIBLE | WS_CHILD, smBtnX + smBtnW + 8, 468, smBtnW, ctlH,
+                hwnd, (HMENU)ID_BTN_LOAD, NULL, NULL);
 
             // 存档目录显示在组内，和存档操作放在一起，不用再往下找一行。
             // SS_ENDELLIPSIS 让过长的路径自动变成省略号，不撑破分组框。
@@ -2203,19 +2569,38 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 应用：把整份草稿推进内存，立刻生效，但不写盘。
             // 重置：把整份草稿恢复成出厂默认。
             // 退出：不看"最小化到托盘"设置，直接结束程序。
-            // 按钮右对齐，右边距 12，和左边距对称。
-            CreateWindowA("BUTTON", "应用", WS_VISIBLE | WS_CHILD,
-                336, 540, 80, 28, hwnd, (HMENU)ID_BTN_APPLY, NULL, NULL);
-            CreateWindowA("BUTTON", "重置", WS_VISIBLE | WS_CHILD,
-                424, 540, 80, 28, hwnd, (HMENU)ID_BTN_RESET, NULL, NULL);
-            CreateWindowA("BUTTON", "退出程序", WS_VISIBLE | WS_CHILD,
-                512, 540, 80, 28, hwnd, (HMENU)ID_BTN_EXIT, NULL, NULL);
+            // 按钮从右边界往左排，宽度按文字实测（英文比中文宽）。
+            int bx = M + wideW - 12 - bigBtnW;
+            CreateWindowA("BUTTON", T(S_BTN_EXIT), WS_VISIBLE | WS_CHILD,
+                bx, 540, bigBtnW, 28, hwnd, (HMENU)ID_BTN_EXIT, NULL, NULL);
+            bx -= bigBtnW + 8;
+            CreateWindowA("BUTTON", T(S_BTN_RESET), WS_VISIBLE | WS_CHILD,
+                bx, 540, bigBtnW, 28, hwnd, (HMENU)ID_BTN_RESET, NULL, NULL);
+            bx -= bigBtnW + 8;
+            CreateWindowA("BUTTON", T(S_BTN_APPLY), WS_VISIBLE | WS_CHILD,
+                bx, 540, bigBtnW, 28, hwnd, (HMENU)ID_BTN_APPLY, NULL, NULL);
 
             // Esc+0 只在窗口前台有效（这个限制在钩子里判断，提示里不再写）
             // 和三个按钮放在同一行：提示靠左、按钮靠右，底部只占一行。
-            CreateWindowA("STATIC", "重置快捷键：Esc + 0",
+            CreateWindowA("STATIC", T(S_HOTKEY_HINT),
                 WS_VISIBLE | WS_CHILD,
-                M, 546, 300, 18, hwnd, NULL, NULL, NULL);
+                M, 546, TextWidth(T(S_HOTKEY_HINT)) + 20, 18, hwnd, NULL, NULL, NULL);
+
+            // ==================== 收尾：字体 + 窗口宽度 ====================
+            // 所有控件统一字体：TextWidth 用的就是这一份，
+            // 不统一的话量出来的宽度和实际渲染对不上。
+            EnumChildWindows(hwnd, SetFontProc, (LPARAM)g_uiFont);
+
+            // 按算出来的客户区宽度调整窗口。此时还没 ShowWindow（在 WinMain 里），
+            // 所以不会出现"先小后大"的闪动。
+            {
+                const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX;
+                RECT rc = { 0, 0, clientW, 620 };
+                AdjustWindowRect(&rc, style, FALSE);
+                SetWindowPos(hwnd, NULL, 0, 0,
+                             rc.right - rc.left, rc.bottom - rc.top,
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
 
             // ==================== 存档初始化 ====================
             // g_saveDir 已经在 WinMain 里定好了（正常 / 回退 / 只读三种模式），
@@ -2244,13 +2629,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 读 save0.ini（默认存档）：缺失属首次运行，损坏则提示并保留备份。
             LoadResult lr = LoadFromFile("save0");
             if (lr == LOAD_FAILED) {
-                SetStatus(hwnd, "存档读取失败，已使用默认值；原文件将在下次保存前备份为 .bak。");
+                SetStatus(hwnd, T(S_ST_LOAD_FAILED_BAK));
             } else if (!g_saveWritable) {
-                SetStatus(hwnd, "只读模式：程序目录不可写且未启用回退，设置不会保存。");
+                SetStatus(hwnd, T(S_ST_READONLY));
             } else if (g_saveDirFallback) {
-                SetStatus(hwnd, "存档目录（程序目录不可写，已改用用户目录）：" + g_saveDir);
+                SetStatus(hwnd, std::string(T(S_ST_DIR_FALLBACK)) + g_saveDir);
             } else {
-                SetStatus(hwnd, "存档目录：" + g_saveDir);
+                SetStatus(hwnd, std::string(T(S_ST_DIR)) + g_saveDir);
             }
 
             // 按钮文字只在映射真正改变时刷新（捕获 / 清空 / 重置 / 加载），
@@ -2299,7 +2684,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 case ID_BTN_SWITCH3:
                 case ID_BTN_SWITCH4: {
                     waitingButtonId = id;
-                    SetDlgItemTextA(hwnd, id, "按任意键...");
+                    SetDlgItemTextA(hwnd, id, T(S_WAITING_KEY));
                     SetFocus(hwnd);   // 把焦点从按钮移到窗口，避免按钮抢占按键
                     break;
                 }
@@ -2355,8 +2740,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     if (!SetAutoStart(want)) {
                         // 注册表写失败（权限、安全软件拦截等）：把勾选状态还原，
                         // 否则界面显示的和实际生效的会不一致。
-                        MessageBoxA(hwnd, "无法修改开机自启动设置（注册表写入失败）。",
-                                    "错误", MB_OK | MB_ICONERROR);
+                        MessageBoxA(hwnd, T(S_MB_AUTOSTART_FAIL),
+                                    T(S_ERR_TITLE), MB_OK | MB_ICONERROR);
                         CheckDlgButton(hwnd, ID_CHECK_AUTOSTART,
                                        want ? BST_UNCHECKED : BST_CHECKED);
                     }
@@ -2374,12 +2759,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
                     if (!g_saveWritable) {
                         // 只读模式：能生效但存不了，脏标记保留
-                        SetStatus(hwnd, "已应用（只读模式，未写入磁盘）");
+                        SetStatus(hwnd, T(S_ST_APPLIED_RO));
                     } else if (SaveToFile("save0")) {
                         g_dirty = false;
-                        SetStatus(hwnd, "已应用，并写入默认存档 save0");
+                        SetStatus(hwnd, T(S_ST_APPLIED_SAVE0));
                     } else {
-                        SetStatus(hwnd, "已应用，但写入 save0 失败");
+                        SetStatus(hwnd, T(S_ST_APPLIED_FAIL));
                     }
                     break;
                 }
@@ -2402,7 +2787,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 case ID_BTN_SAVE: {
                     // 只读模式下按钮本来已置灰，这里再兜一层，防止消息伪造。
                     if (!g_saveWritable) {
-                        MessageBoxA(hwnd, "当前为只读模式，设置无法保存。", "提示",
+                        MessageBoxA(hwnd, T(S_MB_READONLY_SAVE), T(S_TIP_TITLE),
                                     MB_OK | MB_ICONINFORMATION);
                         break;
                     }
@@ -2417,11 +2802,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     if (DoSave(hwnd, slot)) {
                         // 成功只更新状态行，不弹窗：保存是高频操作，弹窗打断太烦。
                         // 失败仍然弹窗，因为那是用户必须知道的事。
-                        SetStatus(hwnd, "已保存：" + g_saveDir + "\\" + slot + ".ini");
+                        SetStatus(hwnd, std::string(T(S_ST_SAVED)) + g_saveDir + "\\" + slot + ".ini");
                     } else {
                         // 不再无条件报"保存成功"：写不进去就要明确告诉用户。
-                        SetStatus(hwnd, "保存失败：无法写入存档目录。");
-                        MessageBoxA(hwnd, "保存失败：无法写入存档目录。", "错误",
+                        SetStatus(hwnd, T(S_ST_SAVE_FAIL));
+                        MessageBoxA(hwnd, T(S_MB_SAVE_FAIL), T(S_ERR_TITLE),
                                     MB_OK | MB_ICONERROR);
                     }
                     break;
@@ -2447,15 +2832,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                         if (g_saveWritable && !SaveToFile("save0")) {
                             // name 是 char[]，必须先转成 std::string，
                             // 否则 "字面量 + char[]" 会退化成指针运算。
-                            SetStatus(hwnd, std::string("已加载：") + name + "（但写入 save0 失败）");
+                            SetStatus(hwnd, std::string(T(S_ST_LOADED)) + name +
+                                            T(S_ST_LOADED_FAIL_SAVE0));
                         } else {
-                            SetStatus(hwnd, "已加载：" + g_saveDir + "\\" + name + ".ini");
+                            SetStatus(hwnd, std::string(T(S_ST_LOADED)) +
+                                            g_saveDir + "\\" + name + ".ini");
                         }
                     } else if (lr == LOAD_MISSING) {
-                        MessageBoxA(hwnd, "存档文件不存在。", "提示", MB_OK | MB_ICONWARNING);
+                        MessageBoxA(hwnd, T(S_MB_NO_SAVE_FILE), T(S_TIP_TITLE),
+                                    MB_OK | MB_ICONWARNING);
                     } else {
-                        SetStatus(hwnd, "存档读取失败，已使用默认值。");
-                        MessageBoxA(hwnd, "存档读取失败，已使用默认值。", "错误",
+                        SetStatus(hwnd, T(S_ST_LOAD_FAILED_BAK));
+                        MessageBoxA(hwnd, T(S_MB_LOAD_FAIL), T(S_ERR_TITLE),
                                     MB_OK | MB_ICONERROR);
                     }
                     break;
@@ -2475,6 +2863,43 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     }
                     break;
                 }
+
+                // ---------- 语言切换 ----------
+                // 语言在启动时定型：控件标题、布局宽度、tooltip 全在 WM_CREATE 里
+                // 按当时的语言算好了，运行中换表只会让界面文字和布局对不上。
+                // 所以这里只写配置 + 标记重启，不动任何界面元素。
+                case ID_COMBO_LANG: {
+                    if (HIWORD(wParam) != CBN_SELCHANGE) break;
+
+                    HWND hLang = GetDlgItem(hwnd, ID_COMBO_LANG);
+                    const int  sel    = (int)SendMessageA(hLang, CB_GETCURSEL, 0, 0);
+                    const bool wantEn = (sel == 1);
+                    const bool isEn   = (g_langTable == kLangEn);
+
+                    if (wantEn == isEn) break;   // 选的就是当前语言，什么都不做
+
+                    if (MessageBoxA(hwnd, T(S_MB_RESTART), T(S_LANG_TITLE),
+                                    MB_YESNO | MB_ICONQUESTION) != IDYES) {
+                        // 不同意重启：下拉框选回当前语言，不写盘、不改状态
+                        SendMessageA(hLang, CB_SETCURSEL, isEn ? 1 : 0, 0);
+                        break;
+                    }
+
+                    // 先落盘再重启：写不进去就别重启，否则重启后又读回旧语言，
+                    // 用户会以为"设置根本没生效"。
+                    if (!SaveLanguage(wantEn ? "en" : "zh-CN")) {
+                        MessageBoxA(hwnd, T(S_MB_LANG_RO), T(S_ERR_TITLE),
+                                    MB_OK | MB_ICONWARNING);
+                        SendMessageA(hLang, CB_SETCURSEL, isEn ? 1 : 0, 0);
+                        break;
+                    }
+
+                    // 走正常退出流程（有未保存的修改会先问），
+                    // 真正的"重新启动"在 WinMain 末尾做。
+                    g_restartRequested = true;
+                    PostMessageA(hwnd, WM_CLOSE, 0, 0);
+                    break;
+                }
             }
             break;
         }
@@ -2482,7 +2907,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         // ---------- 新建存档 ----------
         case WM_NEW_SAVE: {
             if (!g_saveWritable) {
-                MessageBoxA(hwnd, "只读模式下无法新建存档。", "提示", MB_OK | MB_ICONINFORMATION);
+                MessageBoxA(hwnd, T(S_MB_READONLY_NEW), T(S_TIP_TITLE), MB_OK | MB_ICONINFORMATION);
                 break;
             }
 
@@ -2496,7 +2921,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 found = !FileExists(g_saveDir + "\\" + defaultName + ".ini");
             }
             if (!found) {
-                MessageBoxA(hwnd, "存档编号已用尽（save1~save999）。", "提示",
+                MessageBoxA(hwnd, T(S_MB_SAVE_FULL), T(S_TIP_TITLE),
                             MB_OK | MB_ICONWARNING);
                 break;
             }
@@ -2505,7 +2930,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 若用户希望自定义名字，可后续在此处插入输入框。
             // 文件不存在时第一次写入就会创建它，无需先 CreateSaveFile。
             if (!DoSave(hwnd, defaultName)) {
-                MessageBoxA(hwnd, "新建存档失败：无法写入存档目录。", "错误",
+                MessageBoxA(hwnd, T(S_MB_NEW_FAIL), T(S_ERR_TITLE),
                             MB_OK | MB_ICONERROR);
                 break;
             }
@@ -2519,7 +2944,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 SendMessageA(hCombo, CB_SETCURSEL, idx, 0);
             }
 
-            SetStatus(hwnd, "已新建存档：" + std::string(defaultName));
+            SetStatus(hwnd, std::string(T(S_ST_NEW_SAVE)) + defaultName);
             break;
         }
 
@@ -2533,7 +2958,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 退出时仍会问"要不要保存"，这样误按 Esc+0 不会把存档悄悄改掉。
             ResetDraftAndUI(hwnd);
             ApplyDraft();
-            SetStatus(hwnd, "已重置为出厂默认并立即生效（未保存）");
+            SetStatus(hwnd, T(S_ST_RESET));
             return 0;
         }
 
@@ -2580,7 +3005,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                            (vk == g_draft.wheelBoostKey);
             }
             if (conflict) {
-                MessageBoxA(hwnd, "该键已被另一种用途占用，请换一个键。", "按键冲突",
+                MessageBoxA(hwnd, T(S_MB_KEY_CONFLICT), T(S_CONFLICT_TITLE),
                             MB_OK | MB_ICONWARNING);
                 waitingButtonId = 0;
                 UpdateAllButtonText(hwnd);
@@ -2661,6 +3086,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         // ---------- 关闭窗口 ----------
         case WM_CLOSE: {
+            // 语言切换要求重启时，必须真的退出，不能走"最小化到托盘"。
+            if (g_restartRequested) {
+                QuitApp(hwnd);
+                // QuitApp 在用户选"取消"或保存失败时不会销毁窗口 —— 那就中止重启，
+                // 否则下拉框已经改成了新语言，界面却还是旧语言，看起来像坏了。
+                if (IsWindow(hwnd)) {
+                    g_restartRequested = false;
+                    HWND hLang = GetDlgItem(hwnd, ID_COMBO_LANG);
+                    if (hLang) SendMessageA(hLang, CB_SETCURSEL,
+                                            (g_langTable == kLangEn) ? 1 : 0, 0);
+                }
+                return 0;
+            }
+
             // 判断用的是"已生效"的 isMinimizeToTray：勾选框只改草稿，
             // 没点"应用"之前不算数。
             if (isMinimizeToTray.load() && !g_shuttingDown) {
@@ -2687,8 +3126,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 POINT pt;
                 GetCursorPos(&pt);
                 HMENU hMenu = CreatePopupMenu();
-                AppendMenuA(hMenu, MF_STRING, 1, "显示窗口");
-                AppendMenuA(hMenu, MF_STRING, 2, "退出");
+                AppendMenuA(hMenu, MF_STRING, 1, T(S_TRAY_SHOW));
+                AppendMenuA(hMenu, MF_STRING, 2, T(S_TRAY_EXIT));
                 // TrackPopupMenu 要求先把窗口置前台并 SetForegroundWindow，
                 // 否则菜单点完不会消失（Windows 的经典小坑）。
                 SetForegroundWindow(hwnd);
@@ -2725,6 +3164,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 // ==================== 程序入口点 ====================
 // WinMain 是 Windows GUI 应用的入口（跟 main 不同，不出控制台窗口）。
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
+    // 通用控件初始化：tooltip(TTS) 属于通用控件，不初始化时它在某些系统上
+    // 会注册失败，表现为"悬停没有任何反应"。
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_BAR_CLASSES };
+    InitCommonControlsEx(&icc);
+
     // 单实例：重复启动只会挂上第二个全局钩子，导致按键被吞两次、状态错乱。
     // 已有实例则把它叫到前台，本进程直接退出。
     HANDLE hMutex = CreateMutexA(NULL, TRUE, "Local\\KeyboardCursor_SingleInstance");
@@ -2742,6 +3186,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
     // 不清的话可能一开始就误判成"很久没按键"，把状态乱清。
     InitKeyTimers();
 
+    // 语言必须先定：下面的"目录不可写"询问框、以及 WM_CREATE 里所有控件标题
+    // 都要用对应语言的文字，晚了就只能显示成另一种语言。
+    LoadLanguage();
+
     // 存档目录必须在创建窗口之前定下来：WM_CREATE 里就要扫描目录、读 save0.ini。
     // 不可写时这里会询问用户是否回退，拒绝则进入只读模式（程序照常运行）。
     ResolveSaveDir();
@@ -2756,11 +3204,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassA(&wc);
 
-    // 新布局：顶部开关组 + 左右两栏 + 开关组合键 + 存档组 + 单行操作行，640×620。
-    // 因为布局是绝对坐标、没有处理 WM_SIZE，所以去掉可拖动边框和最大化按钮，
-    // 免得用户把窗口拉大后控件全挤在左上角。
+    // 布局：顶部开关组 + 左右两栏 + 开关组合键 + 存档组 + 单行操作行。
+    // 客户区宽度在 WM_CREATE 里按当前语言的文字算出来再调整（这里给的是初值），
+    // 因为布局没有处理 WM_SIZE，所以去掉可拖动边框和最大化按钮。
+    std::string winTitle = std::string(T(S_APP_TITLE)) + " " + T(S_TITLE_OFF);
     HWND hwnd = CreateWindowExA(
-        0, "MyClass", "光标控制 [禁用]",
+        0, "MyClass", winTitle.c_str(),
         WS_OVERLAPPEDWINDOW & ~WS_THICKFRAME & ~WS_MAXIMIZEBOX,
         100, 100, 640, 620,
         NULL, NULL, hInst, NULL
@@ -2774,7 +3223,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
     //   低级钩子不需要 DLL 注入，因此天然支持跨越进程。
     g_hKeyboardHook = SetWindowsHookExA(WH_KEYBOARD_LL, KeyboardProc, hInst, 0);
     if (g_hKeyboardHook == NULL) {
-        MessageBoxA(NULL, "键盘钩子安装失败！", "错误", MB_OK | MB_ICONERROR);
+        MessageBoxA(NULL, T(S_ERR_HOOK), T(S_ERR_TITLE), MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -2802,9 +3251,34 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show) {
         controlThread.join();
     }
 
+    // 单实例互斥必须先放掉：下面 CreateProcess 起来的新实例会自己 CreateMutex，
+    // 如果旧实例还占着，新实例会以为"已有实例在运行"而直接退出 ——
+    // 表现就是"点了重启，程序却再也没起来"。
     if (hMutex != NULL) {
         ReleaseMutex(hMutex);
         CloseHandle(hMutex);
+        hMutex = NULL;
     }
+
+    // 切换语言后的自重启：放在最后，此时钩子已卸、控制线程已停，
+    // 新旧实例不会同时注入鼠标键盘。
+    if (g_restartRequested) {
+        g_restartRequested = false;
+
+        char exe[MAX_PATH] = {};
+        GetModuleFileNameA(NULL, exe, MAX_PATH);
+
+        STARTUPINFOA si = {};
+        si.cb = sizeof(si);
+        PROCESS_INFORMATION pi = {};
+        if (CreateProcessA(exe, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else {
+            // 起不来就明说，别让用户以为程序"自己消失了"
+            MessageBoxA(NULL, T(S_MB_RESTART_FAIL), T(S_ERR_TITLE), MB_OK | MB_ICONERROR);
+        }
+    }
+
     return 0;
 }
