@@ -1,142 +1,300 @@
-## 编译
+# Keyboard Cursor · 键盘控制鼠标
+
+用键盘代替鼠标：按住几个键就能移动光标、点击、滚动，长按还会平滑加速。
+面向"右手不想离开键盘"的场景（画图、写代码、浏览长文档、远程桌面）。
+
+Windows 上的单文件 Win32 程序，无第三方依赖，编译出来就是一个 exe。
+
+> A single-file Win32 utility that turns keyboard input into mouse movement, clicks and
+> scrolling — with smooth acceleration, per-function key bindings and a combo-key toggle.
+> Built with MinGW-w64, no external dependencies.
+
+---
+
+## 目录
+
+- [功能特性](#功能特性)
+- [快速开始](#快速开始)
+- [使用说明](#使用说明)
+- [参数说明](#参数说明)
+- [配置文件](#配置文件)
+- [多语言](#多语言)
+- [工作原理](#工作原理)
+- [已知限制](#已知限制)
+- [常见问题](#常见问题)
+- [第三方与许可](#第三方与许可)
+- [免责声明](#免责声明)
+
+---
+
+## 功能特性
+
+**移动与点击**
+
+- 11 个按键全部可改键：9 个功能（上/下/左/右 移动、左键/右键/中键 点击、滚轮上/下）+ 移动加速键 + 滚轮加速键
+- 亚像素累加：初始速度可以填 `0.5`，表现为每两拍走 1 像素，慢速下也很细腻
+- 加速模型：按住方向键从"初始速度"开始，每拍增加"加速度"，到"速度上限"封顶
+- 拐弯自动回落：反向、转向、多按/少按方向键，速度立刻回到初始速度，不会"冲过头"
+- 独立的加速键：按住时速度乘"加速倍率"，倍率可以小于 1（按住减速，用于精细定位）
+
+**滚轮**
+
+- 滚轮速度、滚轮加速、滚轮间隔（两次滚动的节流）都可调
+- 独立的"滚轮加速键"，可以和移动加速键分开（默认都是 Shift）
+- 三层安全限制，防止把目标程序卡死：
+  - 单条消息最多 200 档（避开 `WM_MOUSEWHEEL` 的 16 位截断 —— 超过会反向滚）
+  - 单次事件最多 3000 档
+  - 全局平均速率上限 60000 档/秒
+
+**开关**
+
+- 组合键总开关：1~4 个键同时按下触发，默认 `CapsLock` 单键
+- 两种模式：**按下切换**（按一下开、再按一下关）/ **按住生效**（按下开、松开关）
+- 启动默认禁用，窗口标题显示 `[禁用]`，不会一开机就抢键
+
+**存档**
+
+- `data/save/save0.ini` 是"下次启动恢复的状态"，保存/应用都会更新它
+- 另有 `save1..save999` 多个存档槽，界面里可以随时切换
+- 目录不可写时：可以回退到 `%LOCALAPPDATA%`，或者降级为只读模式（照常能用，只是不保存）
+
+**其它**
+
+- 开机自启动（写 `HKCU\...\Run`，并同步任务管理器里的启用状态）
+- 最小化到托盘，托盘右键可显示窗口/退出
+- 快捷重置：**Esc + 0**，一键恢复出厂设置并立即生效（不写盘，退出时仍会问要不要保存）
+- 刷新间隔 1~300ms 可调，默认 6ms；用高精度可等待定时器，等待期间不占 CPU
+- 数值输入框只接受合法数字串（多余的小数点、负号会被直接吞掉）
+- 8 个数值框都有悬停提示，解释单位
+- 看门狗：切到高权限窗口导致 keyup 丢失时，自动复位按键状态，避免"光标自己一直走"
+- 单实例：重复启动只会把已有窗口叫到前台
+
+---
+
+## 快速开始
+
+### 编译
+
+需要 **MinGW-w64**（GCC）。目前用 GCC 14.2 验证过。
 
 ```powershell
-g++ -std=c++11 -O2 -s -mwindows -static -pthread -fexec-charset=GBK KeyboardCursor.cpp -o KeyboardCursor.exe -lwinmm -lgdi32 -luser32 -lshell32
+g++ -std=c++11 -O2 -s -mwindows -static -pthread -fexec-charset=GBK KeyboardCursor.cpp -o KeyboardCursor.exe -lcomctl32 -lwinmm -lgdi32 -luser32 -lshell32
 ```
 
-# 这个介绍过期了
+> `-fexec-charset=GBK` 是**必须**的：源码里的界面文字是 UTF-8，编译时转成 GBK 字节给 ANSI 版 Win32 API 用。
+> 去掉它中文会变成乱码。
 
+### 运行
 
-# 🖱️ 光标控制程序 / Cursor Control Program
+直接双击 `KeyboardCursor.exe`。首次运行会自动创建：
 
-一个轻量的键盘驱动鼠标控制工具：绑定按键即可移动光标、点击和滚动滚轮，并通过组合键一键启用/禁用控制。
+```
+data\
+  config.ini      ← 语言等程序级设置
+  save\save0.ini  ← 首个存档
+```
 
-A lightweight keyboard-driven mouse controller. Bind keys to move the cursor, click, and scroll — then toggle control on and off with a hotkey.
-
----
-
-## 📌 1. 启动程序 / Start the Program
-
-编译并运行可执行文件。首次启动时，程序会自动创建 `save/` 文件夹（若不存在），并加载默认配置文件 `save0.ini`。
-
-Compile and run the executable. On first launch, the program automatically creates a `save/` folder (if missing) and loads the default configuration file `save0.ini`.
-
----
-
-## 📌 2. 按键绑定方法 / How to Bind Keys
-
--  点击要绑定的按键按钮（如 **上**、**左键**、**滚轮上移**）。
--  系统提示 **"按任意键..."**，此时按下任意键（如 `E`）。
--  绑定的按键会显示在按钮上，即可使用。
-
--  Click the key button you want to bind (e.g., **Up**, **Left Click**, **Scroll Up**).
--  The system prompts **"Press any key..."** — press any key (e.g., `E`).
--  The bound key is now displayed on the button and ready to use.
+程序启动时是**禁用**状态，先按一下组合键（默认 `CapsLock`）才会接管键鼠，
+标题栏会从 `[禁用]` 变成 `[启用]`。
 
 ---
 
-## 📌 3. 启用 / 禁用光标控制 / Enable & Disable Cursor Control
+## 使用说明
 
-按 **组合键1（默认 `Ctrl`）** + **组合键2（默认 `Shift`）** 切换光标控制的启用状态。窗口标题显示当前状态：`[启用]` / `[禁用]`。
+### 默认按键
 
-Press **Key 1 (default `Ctrl`)** + **Key 2 (default `Shift`)** to toggle cursor control. The window title shows the current state: `[Enable]` / `[Disable]`.
+| 功能 | 默认键 | 说明 |
+|---|---|---|
+| 上 / 下 / 左 / 右 | `E` / `D` / `S` / `F` | 按住移动，越按越快 |
+| 左键 / 右键 / 中键 | `J` / `K` / `M` | 按住即按下 |
+| 滚轮上 / 下 | `O` / `L` | 按滚轮间隔节流 |
+| 加速键 | `Shift` | 按住时移动速度 ×3 |
+| 滚轮加速键 | `Shift` | 按住时滚轮档位 ×3 |
+| 总开关 | `CapsLock` | 按一下切换启用/禁用 |
 
----
+所有键都可以在界面上点对应按钮重新绑定（按 `Esc` 取消捕获）。
+一个键不能同时承担两种用途，冲突时会提示。
 
-## 📌 4. 鼠标控制方式 / How to Control the Mouse
+### 快捷重置
 
-| 按键 | 功能 |
-|------|------|
-| `E` | 光标上移 |
-| `D` | 光标下移 |
-| `S` | 光标左移 |
-| `F` | 光标右移 |
-| `J` | 左键按下 |
-| `K` | 右键按下 |
-| `M` | 中键按下 |
-| `O` | 滚轮上移 |
-| `L` | 滚轮下移 |
+窗口在前台时按 **Esc + 0**：恢复全部出厂设置**并立即生效**（不写盘）。
+如果之后退出，仍会问"要不要保存"。
 
-| Key | Action |
-|-----|--------|
-| `E` | Move cursor up |
-| `D` | Move cursor down |
-| `S` | Move cursor left |
-| `F` | Move cursor right |
-| `J` | Press left mouse button |
-| `K` | Press right mouse button |
-| `M` | Press middle mouse button |
-| `O` | Scroll wheel up |
-| `L` | Scroll wheel down |
+### 提示
 
-> 上表为默认按键，任意按键均可重新绑定（见 §2）。 / The keys above are defaults; any key can be rebound (see §2).
+- 方向键支持**组合**：同时按住 `E` + `F` 就是右上斜着走
+- 速度单位是"每拍多少像素"，改"刷新间隔"会等比改变实际速度 —— 刷新间隔从 6 改到 3，同样的速度值会快一倍
+- 换语言需要重启程序（弹窗会问要不要立刻重启）
 
 ---
 
-## 📌 5. 滚轮设置 / Wheel Settings
+## 参数说明
 
-| 设置项 | 控件 ID | 默认值 |
-|--------|---------|--------|
-| 滚轮间隔 | `ID_EDIT_WHEEL_INTERVAL` | 80 ms |
-| 滚轮速度 | `ID_EDIT_WHEEL_SPEED` | 1 |
-| 滚轮加速倍率 | `WHEEL_SPEED_MULTIPLIER`（配合 `Shift`） | 3 |
+| 参数 | 范围 | 说明 |
+|---|---|---|
+| 初始速度 | -1000 ~ 1000 | 起步时每拍移动的像素数；负数 = 反向 |
+| 加速度 | -500 ~ 500 | 每拍增加多少；负数 = 减速（减到 0 停住，不会自己反向） |
+| 速度上限 | 0 ~ 2000 | 加速到这里封顶。**小于初始速度时改作下限用**（速度不会低于它，上界变成初始速度） |
+| 加速倍率 | -1000 ~ 1000 | 按住加速键时乘这个值；负数 = 翻转方向；0 = 刹车 |
+| 滚轮间隔 | 1 ~ 10000 ms | 两次滚轮事件的最小间隔 |
+| 滚轮速度 | 1 ~ 260 档 | 一次滚轮滚多少行 |
+| 滚轮加速 | 1 ~ 260 | 按住滚轮加速键时乘这个值 |
+| 刷新间隔 | 1 ~ 300 ms | 控制线程多久醒一次；默认 6ms（≈167Hz） |
 
-- **滚轮方向按键**：设为 `O` / `L`（上 / 下）。
-- **滚轮间隔**：每次滚动之间的延迟（默认 `80 ms`）。
-- **滚轮速度**：每次按键的滚动步数（默认 `1`）。
-- **滚轮加速**：按住 `Shift` 时，滚动速度乘以 `WHEEL_SPEED_MULTIPLIER`（默认 `3`）。
-
-| Setting | Item ID | Default |
-|---------|---------|---------|
-| Scroll interval | `ID_EDIT_WHEEL_INTERVAL` | 80 ms |
-| Scroll speed | `ID_EDIT_WHEEL_SPEED` | 1 |
-| Scroll speed multiplier | `WHEEL_SPEED_MULTIPLIER` (with `Shift`) | 3 |
-
-- **Scroll keys**: assign `O` / `L` to scroll up / down.
-- **Scroll interval**: delay between scroll steps (default `80 ms`).
-- **Scroll speed**: number of scroll steps per key press (default `1`).
-- **Scroll acceleration**: hold `Shift` to multiply scroll speed by `WHEEL_SPEED_MULTIPLIER` (default `3`).
+> 滚轮"速度 × 加速"超过 3000 的部分会被截断，这是有意的保护：
+> 一次滚 3000 行已经足够，再多只会让目标程序卡住。
 
 ---
 
-## 📌 6. 保存 / 加载设置 / Save & Load Settings
+## 配置文件
 
-- **保存按钮** — 将当前配置保存为 `saveX.ini`（如 `save1.ini`）。若选择 `+`，程序会自动创建新的存档文件。
-- **加载按钮** — 从下拉列表中选择存档，读取配置并应用。
+```
+data\
+  config.ini          ← 语言
+  save\
+    save0.ini         ← 下次启动恢复的状态（保存/应用都会写它）
+    save1.ini ...
+```
 
-- **Save button** — Saves the current configuration to `saveX.ini` (e.g., `save1.ini`). Selecting `+` creates a new save file automatically.
-- **Load button** — Select an entry from the dropdown list to load and apply that configuration.
+`config.ini`：
+
+```ini
+[UI]
+language=zh-CN      ; zh-CN / en / ja / ru
+```
+
+`saveN.ini` 的键：
+
+```ini
+[Speed]
+MOVE_SPEED=1.5          ; 初始速度
+MOVE_ACCEL=0.02         ; 加速度
+MOVE_MAX_SPEED=5        ; 速度上限
+SPEED_MULTIPLIER=3      ; 加速倍率
+WHEEL_INTERVAL=80       ; 滚轮间隔(ms)
+WHEEL_SPEED=1           ; 滚轮速度
+WHEEL_SPEED_MULTIPLIER=3; 滚轮加速
+tickMs=6                ; 刷新间隔(ms)
+
+[Keys]
+keyUp=69 keyDown=68 keyLeft=83 keyRight=70
+keyLClick=74 keyRClick=75 keyMClick=77
+keyWheelUp=79 keyWheelDown=76
+boostKey=16             ; 加速键（Shift）
+wheelBoostKey=16        ; 滚轮加速键
+
+[Switch]
+switchKey1=20           ; 组合键槽位，0 = 空
+switchKey2=0
+switchKey3=0
+switchKey4=0
+holdMode=0              ; 0=按下切换 1=按住生效
+
+[Options]
+interceptEnabled=1      ; 是否拦截映射键（关掉后按键会透传给前台窗口）
+isMinimizeToTray=0
+```
+
+键值都是**虚拟键码**（`VK_*`），字母就是其 ASCII 值。
 
 ---
 
-## 📌 7. 重置设置 / Reset All Settings
+## 多语言
 
-点击 **重置** 按钮，**或** 按 `Esc` + `0`（仅当程序窗口处于前台时）。所有按键将恢复为默认值（如 `E`、`J`、`Ctrl`、`Shift` 等）。
+内置 4 种界面语言，右上角下拉框切换：
 
-Click the **Reset** button, **or** press `Esc` + `0` (only when the window is in the foreground). All keybindings revert to their default values (e.g., `E`, `J`, `Ctrl`, `Shift`, etc.).
+| 语言 | 代码 | 下拉框显示 |
+|---|---|---|
+| 简体中文 | `zh-CN` | CN 简体中文 |
+| English | `en` | EN English |
+| 日本語 | `ja` | JP 日本語 |
+| Русский | `ru` | RU Русский |
+
+切换后必须重启程序 —— 布局是按当前语言的文字宽度实测排版的，运行时换表会让文字和控件对不上。
+所以选择语言后会弹窗询问，同意则自动重启。
+
+**已知限制**：界面文字走 ANSI 版 API + GBK 编译字符集，所以只能放 GBK 里有的字符。
+日语（假名在 GB2312 第 5 区）和俄语（西里尔在第 7 区）可以，
+但德语 `ß`、西语 `ñ`、阿拉伯语、印地语这些**不在 GBK 里**，需要改成 Unicode 架构才能支持。
 
 ---
 
-## 📌 8. 最小化到托盘（可选）/ Minimize to Tray (Optional)
+## 工作原理
 
-勾选 **最小化到托盘** 选项。关闭程序窗口时，程序会隐藏到系统托盘而不退出。
+```
+┌─────────────┐   WH_KEYBOARD_LL    ┌──────────────┐
+│  键盘钩子    │ ── 只写 atomic ──▶  │  控制线程     │
+│ (主线程)     │     变量，不阻塞     │ (独立线程)    │
+└─────────────┘                     └──────┬───────┘
+                                          │ 每 TICK_MS 一拍
+                            ┌─────────────┼─────────────┐
+                            ▼             ▼             ▼
+                    SetCursorPos     SendInput      SendInput
+                     （移动）        （点击）        （滚轮）
+```
 
-> ⚠️ **注意：** 目前不支持托盘交互 —— 隐藏后尚无法从托盘还原窗口。此为已知限制，后续版本可扩展。
+几个设计取舍：
 
-Check the **Minimize to Tray** option. When you close the window, the program hides in the system tray instead of exiting.
-
-> ⚠️ **Note:** Tray interaction is not currently supported — the window cannot yet be restored from the tray. This is a known limitation and can be extended in future versions.
+- **钩子回调只写原子变量**，不做任何耗时操作；真正的决策和注入都在控制线程里
+- **移动用 `SetCursorPos`** 而不是 `SendInput` 的绝对坐标：对"移动意图"更直接，也不受指针加速曲线影响
+- **亚像素累加**：速度是小数，每拍把带小数的位移累加，只走整数部分，余数留到下一拍
+- **滚轮分块发送**：`WM_MOUSEWHEEL` 的累计量在消息里是 16 位有符号数，超过 32767 会变成负数，所以每 200 档切一块
+- **看门狗**：切到任务管理器这类高权限窗口时，UIPI 会让程序收不到 keyup，状态会卡在"按着"。所以每拍检查一次，确认光标真的推不动时才复位状态
 
 ---
 
-## 📌 9. 快速总结 / Quick Summary
+## 已知限制
 
-- 运行程序。
-- 点击某个按键按钮（如 **上**、**左键**、**滚轮上移**），然后按任意键（如 `E`）完成绑定。
-- 按 `Ctrl` + `Shift` 启用 / 禁用光标控制。
-- 按对应按键即可移动鼠标、点击或滚动。
+| 限制 | 说明 |
+|---|---|
+| 对管理员权限窗口无效 | 全局钩子受 UIPI 限制：既收不到管理员窗口的按键，也注入不进去。需要用任务计划程序以"最高权限"运行本程序 |
+| 窗口大小固定 | 布局按当前语言实测排版，不支持拖动缩放 |
+| 语言切换需重启 | 见上文原因 |
+| 只支持 GBK 内的语言 | 见"多语言" |
+| 可能被杀软误报 | 全局键盘钩子 + 模拟鼠标输入 + 无数字签名，是典型的"可疑组合"。程序不联网、不收集任何数据 |
 
-- Run the program.
-- Click a key button (e.g., **Up**, **Left Click**, **Scroll Up**), then press any key (e.g., `E`).
-- Press `Ctrl` + `Shift` to enable / disable cursor control.
-- Press the corresponding keys to move the mouse, click, or scroll.
+---
+
+## 常见问题
+
+**Q：按了方向键，光标不动？**
+先看标题栏是不是 `[禁用]`。启动默认禁用，按一下组合键（默认 `CapsLock`）才会接管。
+
+**Q：在任务管理器 / 管理员程序里不起作用？**
+UIPI 限制，见"已知限制"。用管理员权限运行本程序可以缓解，但系统安全桌面（UAC 提示、锁屏）里一定无效。
+
+**Q：杀毒软件报警？**
+全局键盘钩子 + 鼠标注入的特征确实容易被误判。可以核对源码，或者自己编译。
+
+**Q：设置改了没生效？**
+界面上的改动先进"草稿"，点**应用**才生效，点**保存**才落盘。这是有意的设计，避免误改。
+
+**Q：`data` 目录是干什么的？**
+程序的全部外部文件都在里面，删掉等于恢复出厂设置（下次启动会重建）。
+
+**Q：能带着存档拷到别的电脑吗？**
+可以，整个 `data` 目录跟着 exe 走就行。
+
+---
+
+## 第三方与许可
+
+- 代码本身：单文件 `KeyboardCursor.cpp`，无第三方库
+- 运行时依赖：Windows 系统 DLL（`user32` `gdi32` `shell32` `winmm` `comctl32` `advapi32`）和 C 运行库
+- 静态链接了 GCC 的 `libstdc++` / `libgcc`，它们采用 **GPLv3 + GCC Runtime Library Exception 3.1**。
+  该例外条款明确允许把运行时库静态链接进闭源程序分发，**不要求公开本程序源码**。
+  如需合规声明，随发布物附上：
+
+  ```
+  This software is statically linked with GCC libstdc++ / libgcc,
+  licensed under GNU GPL v3 with the GCC Runtime Library Exception 3.1.
+  Source: https://gcc.gnu.org/
+  ```
+
+---
+
+## 免责声明
+
+本程序会**拦截键盘按键**并**模拟鼠标输入**。请在你自己拥有或已获授权的设备上使用。
+在游戏、反作弊环境、远程控制软件或任何不允许自动输入的场景中使用，可能导致账号被封禁，
+由此产生的后果由使用者自行承担。
