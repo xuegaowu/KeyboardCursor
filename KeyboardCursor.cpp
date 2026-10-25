@@ -62,173 +62,283 @@ using namespace std::chrono;
 
 // ==================== 多语言字符串表 ====================
 // 所有界面文字集中到一张 X 宏表里，再由它生成"枚举 + 每种语言一张数组"。
-// 这样枚举和数组的内容来自同一份数据，不可能出现"加了一条中文忘了加英文"
+// 这样枚举和数组的内容来自同一份数据，不可能出现"加了中文忘了加英文"
 // 导致下标错位的问题（那种错位不会报编译错误，只会显示出完全无关的文字）。
+// 列的顺序固定为：ID, 中文, 英文, 日语, 俄语。加语言时只要在这四处同步
+// 长一列即可，不用碰调用点。
 //
-// 用 ID 而不是"按中文原文查表"：同一个词在不同语境下英文不一样
+// 用 ID 而不是"按中文原文查表"：同一个词在不同语境下不同语言不一样
 // （"开关"作分组名要译 Switches，作动词是另一个词），按原文查迟早撞车。
 //
 // 注意：源码是 UTF-8 + BOM，编译时 -fexec-charset=GBK 会把字面量转成 GBK。
-// 所以这里**不能写 GBK 里没有的字符**（西语的 ñ、波兰语的 ł 等会直接编译报错），
-// 那种语言必须走外部文件 + 运行时转码的路线。
+// 所以这里**不能写 GBK 里没有的字符**（西语的 ñ、波兰语的 ł、俄语的 ё 等
+// 会直接编译报错），那种语言必须走外部文件 + 运行时转码的路线。
 #define LANG_TABLE(X)                                                          \
-    X(APP_TITLE,        "光标控制", "Keyboard Cursor")                          \
-    X(TITLE_ON,         "[启用]",   "[On]")                                     \
-    X(TITLE_OFF,        "[禁用]",   "[Off]")                                    \
-    X(TRAY_SHOW,        "显示窗口", "Show window")                              \
-    X(TRAY_EXIT,        "退出",     "Exit")                                     \
-    X(ERR_HOOK,         "键盘钩子安装失败！", "Failed to install the keyboard hook.") \
+    X(APP_TITLE,        "光标控制", "Keyboard Cursor", "カーソル制御", "Управление курсором") \
+    X(TITLE_ON,         "[启用]",   "[On]",   "[有効]", "[Вкл]")                \
+    X(TITLE_OFF,        "[禁用]",   "[Off]",  "[無効]", "[Выкл]")               \
+    X(TRAY_SHOW,        "显示窗口", "Show window", "ウィンドウを表示", "Показать окно") \
+    X(TRAY_EXIT,        "退出",     "Exit",   "終了",   "Выход")                \
+    X(ERR_HOOK,         "键盘钩子安装失败！", "Failed to install the keyboard hook.", \
+                        "キーボードフックの取り付けに失敗しました。", "Не удалось установить клавиатурный хук.") \
     /* ---- 顶部开关组 ---- */                                                  \
-    X(GRP_SWITCH,       "开关",                 "Switches")                     \
-    X(CHK_INTERCEPT,    "启用按键拦截",         "Intercept keys")               \
-    X(CHK_TRAY,         "关闭时最小化到托盘",   "Minimize to tray")             \
-    X(CHK_AUTOSTART,    "开机自启动",           "Auto start")                   \
+    X(GRP_SWITCH,       "开关",                 "Switches",  "スイッチ",           "Переключатели") \
+    X(CHK_INTERCEPT,    "启用按键拦截",         "Intercept keys", "キー入力を横取りする", "Перехватывать клавиши") \
+    X(CHK_TRAY,         "关闭时最小化到托盘",   "Minimize to tray", "閉じたらトレイに格納", "Сворачивать в трей") \
+    X(CHK_AUTOSTART,    "开机自启动",           "Auto start", "スタートアップに登録", "Автозапуск") \
     /* ---- 速度组 ---- */                                                      \
-    X(GRP_SPEED,        "速度",             "Speed")                            \
-    X(LBL_SPEED,        "初始速度:",        "Start speed:")                     \
-    X(LBL_ACCEL,        "加速度:",          "Acceleration:")                    \
-    X(LBL_MAXSPEED,     "速度上限:",        "Max speed:")                       \
-    X(LBL_MUL,          "加速倍率:",        "Boost factor:")                    \
-    X(LBL_WIVL,         "滚轮间隔(ms):",    "Wheel interval(ms):")              \
-    X(LBL_WSPD,         "滚轮速度:",        "Wheel speed:")                     \
-    X(LBL_WMUL,         "滚轮加速:",        "Wheel boost:")                     \
-    X(LBL_TICK,         "刷新间隔(ms):",    "Refresh(ms):")                     \
+    X(GRP_SPEED,        "速度",             "Speed",   "速度",     "Скорость")     \
+    X(LBL_SPEED,        "初始速度:",        "Start speed:", "初速:", "Начальная скорость:") \
+    X(LBL_ACCEL,        "加速度:",          "Acceleration:", "加速度:", "Ускорение:") \
+    X(LBL_MAXSPEED,     "速度上限:",        "Max speed:", "最高速度:", "Макс. скорость:") \
+    X(LBL_MUL,          "加速倍率:",        "Boost factor:", "加速倍率:", "Множитель разгона:") \
+    X(LBL_WIVL,         "滚轮间隔(ms):",    "Wheel interval(ms):", "ホイール間隔(ms):", "Интервал колеса (мс):") \
+    X(LBL_WSPD,         "滚轮速度:",        "Wheel speed:", "ホイール量:", "Шаг колеса:") \
+    X(LBL_WMUL,         "滚轮加速:",        "Wheel boost:", "ホイール加速:", "Разгон колеса:") \
+    X(LBL_TICK,         "刷新间隔(ms):",    "Refresh(ms):", "更新周期(ms):", "Период обновления (мс):") \
     /* ---- 8 个数值框的悬停解释 ---- */                                        \
     X(TIP_SPEED,        "按下方向键后第一拍移动的像素数",                       \
-                        "Pixels moved on the first tick after pressing a direction key") \
+                        "Pixels moved on the first tick after pressing a direction key", \
+                        "方向キーを押した直後に 1 拍で動くピクセル数",          \
+                        "Сколько пикселей проходит курсор за первый такт после нажатия") \
     X(TIP_ACCEL,        "每拍增加多少速度，0 表示不加速",                       \
-                        "Speed added per tick. 0 means no acceleration")        \
+                        "Speed added per tick. 0 means no acceleration",        \
+                        "1 拍ごとに増える速度。0 で加速しない",                 \
+                        "Прибавка скорости за такт. 0 - без разгона")           \
     X(TIP_MAXSPEED,     "速度加速到这里为止；比初始速度小时改作下限用",         \
-                        "Acceleration stops here. If lower than the start speed it becomes the minimum") \
+                        "Acceleration stops here. If lower than the start speed it becomes the minimum", \
+                        "ここまで加速する。初速より小さいときは下限として使う",  \
+                        "Разгон до этого значения. Если оно меньше начальной скорости, работает как минимум") \
     X(TIP_MUL,          "按住加速键时速度乘这个值，可以小于 1（减速）",         \
-                        "Multiplier applied while the boost key is held. Below 1 slows down") \
+                        "Multiplier applied while the boost key is held. Below 1 slows down", \
+                        "加速キーを押している間の倍率。1 未満で減速",           \
+                        "Множитель при удержании клавиши разгона. Меньше 1 - замедление") \
     X(TIP_WIVL,         "两次滚轮事件之间的最小间隔",                           \
-                        "Minimum gap between two wheel events")                 \
+                        "Minimum gap between two wheel events",                 \
+                        "ホイール操作の最小間隔",                               \
+                        "Минимальный интервал между прокрутками")               \
     X(TIP_WSPD,         "一次滚轮事件滚多少行",                                 \
-                        "How many lines one wheel event scrolls")               \
+                        "How many lines one wheel event scrolls",               \
+                        "1 回のホイールで何行スクロールするか",                 \
+                        "Сколько строк прокручивается за одно событие")         \
     X(TIP_WMUL,         "按住滚轮加速键时滚轮乘这个值，单次最多 3000 行",       \
-                        "Multiplier while the wheel-boost key is held. Capped at 3000 lines per event") \
+                        "Multiplier while the wheel-boost key is held. Capped at 3000 lines per event", \
+                        "ホイール加速キーを押している間の倍率。1 回 3000 行まで", \
+                        "Множитель при удержании клавиши разгона колеса. Не более 3000 строк за раз") \
     X(TIP_TICK,         "控制线程多久醒一次（越小越跟手、越费 CPU）。速度的单位是“每拍”",  \
-                        "How often the control loop wakes. Smaller is smoother but uses more CPU") \
+                        "How often the control loop wakes. Smaller is smoother but uses more CPU", \
+                        "制御スレッドが目覚める間隔（小さいほど滑らか、CPU 負荷は増える）。速度の単位は「1 拍あたり」", \
+                        "Как часто просыпается поток управления (меньше - плавнее, но выше нагрузка). Скорость задается в пикселях за такт") \
     /* ---- 按键映射组 ---- */                                                  \
-    X(GRP_KEYS,         "按键映射",     "Key mapping")                          \
-    X(LBL_UP,           "上:",          "Up:")                                  \
-    X(LBL_DOWN,         "下:",          "Down:")                                \
-    X(LBL_LEFT,         "左:",          "Left:")                                \
-    X(LBL_RIGHT,        "右:",          "Right:")                               \
-    X(LBL_LCLICK,       "左键:",        "L-Click:")                             \
-    X(LBL_RCLICK,       "右键:",        "R-Click:")                             \
-    X(LBL_MCLICK,       "中键:",        "M-Click:")                             \
-    X(LBL_WUP,          "上滚:",        "Wheel up:")                            \
-    X(LBL_WDOWN,        "下滚:",        "Wheel down:")                          \
-    X(LBL_BOOST,        "加速:",        "Boost:")                               \
-    X(LBL_WBOOST,       "滚轮加速:",    "Wheel boost:")                         \
-    X(NONE,             "无",           "(none)")                               \
-    X(WAITING_KEY,      "按任意键...",  "Press a key...")                       \
+    X(GRP_KEYS,         "按键映射",     "Key mapping", "キー割り当て", "Назначение клавиш") \
+    X(LBL_UP,           "上:",          "Up:",    "上:",   "Вверх:")            \
+    X(LBL_DOWN,         "下:",          "Down:",  "下:",   "Вниз:")             \
+    X(LBL_LEFT,         "左:",          "Left:",  "左:",   "Влево:")            \
+    X(LBL_RIGHT,        "右:",          "Right:", "右:",   "Вправо:")           \
+    X(LBL_LCLICK,       "左键:",        "L-Click:", "左クリック:", "ЛКМ:")      \
+    X(LBL_RCLICK,       "右键:",        "R-Click:", "右クリック:", "ПКМ:")      \
+    X(LBL_MCLICK,       "中键:",        "M-Click:", "中クリック:", "СКМ:")      \
+    X(LBL_WUP,          "上滚:",        "Wheel up:", "上スクロール:", "Колесо вверх:") \
+    X(LBL_WDOWN,        "下滚:",        "Wheel down:", "下スクロール:", "Колесо вниз:") \
+    X(LBL_BOOST,        "加速:",        "Boost:", "加速:", "Разгон:")           \
+    X(LBL_WBOOST,       "滚轮加速:",    "Wheel boost:", "ホイール加速:", "Разгон колеса:") \
+    X(NONE,             "无",           "(none)", "なし", "нет")                \
+    X(WAITING_KEY,      "按任意键...",  "Press a key...", "キーを押してください...", "Нажмите клавишу...") \
     /* ---- 组合键组 ---- */                                                    \
     X(GRP_COMBO,        "开关组合键（1~4 个键同时按下）",                       \
-                        "Combo key (hold 1-4 keys)")                            \
-    X(CLEAR_ALL,        "清空全部",     "Clear all")                            \
+                        "Combo key (hold 1-4 keys)",                            \
+                        "トグルキー（1～4 個を同時押し）",                      \
+                        "Комбо-клавиша (1-4 клавиши вместе)")                   \
+    X(CLEAR_ALL,        "清空全部",     "Clear all", "すべて消去", "Очистить все") \
     X(RADIO_TOGGLE,     "按下切换（按一下开、再按一下关）",                     \
-                        "Toggle (press to switch)")                             \
+                        "Toggle (press to switch)",                             \
+                        "押すたびに切り替え（もう一度押すと元に戻る）",        \
+                        "Переключение (нажал - вкл, еще раз - выкл)")           \
     X(RADIO_HOLD,       "按住生效（按下开、松开关）",                           \
-                        "Hold (press = on, release = off)")                     \
-    X(HOTKEY_HINT,      "重置快捷键：Esc + 0", "Reset hotkey: Esc + 0")         \
+                        "Hold (press = on, release = off)",                     \
+                        "押している間だけ有効（離すと無効）",                   \
+                        "Только пока удерживается (отпустил - выкл)")           \
+    X(HOTKEY_HINT,      "重置快捷键：Esc + 0", "Reset hotkey: Esc + 0", "リセット: Esc + 0", "Сброс: Esc + 0") \
     /* ---- 存档组 ---- */                                                      \
-    X(GRP_SAVE,         "存档",         "Saves")                                \
-    X(BTN_SAVE,         "保存",         "Save")                                 \
-    X(BTN_LOAD,         "加载",         "Load")                                 \
-    X(BTN_APPLY,        "应用",         "Apply")                                \
-    X(BTN_RESET,        "重置",         "Reset")                                \
-    X(BTN_EXIT,         "退出程序",     "Exit")                                 \
+    X(GRP_SAVE,         "存档",         "Saves",  "設定",   "Профили")          \
+    X(BTN_SAVE,         "保存",         "Save",   "保存",   "Сохранить")        \
+    X(BTN_LOAD,         "加载",         "Load",   "読込",   "Загрузить")        \
+    X(BTN_APPLY,        "应用",         "Apply",  "適用",   "Применить")        \
+    X(BTN_RESET,        "重置",         "Reset",  "リセット", "Сброс")          \
+    X(BTN_EXIT,         "退出程序",     "Exit",   "終了",   "Выход")            \
     /* ---- 状态行 ---- */                                                      \
     X(ST_LOAD_FAILED_BAK, "存档读取失败，已使用默认值；原文件将在下次保存前备份为 .bak。", \
-                          "Failed to read the save file; defaults loaded. The old file will be backed up as .bak.") \
+                          "Failed to read the save file; defaults loaded. The old file will be backed up as .bak.", \
+                          "設定の読み込みに失敗したため既定値を使います。元のファイルは次回保存前に .bak として退避します。", \
+                          "Не удалось прочитать профиль, взяты значения по умолчанию; старый файл будет сохранен как .bak.") \
     X(ST_READONLY,      "只读模式：程序目录不可写且未启用回退，设置不会保存。",  \
-                        "Read-only: the program folder is not writable and no fallback is enabled") \
+                        "Read-only: the program folder is not writable and no fallback is enabled", \
+                        "読み取り専用：プログラムのフォルダーに書き込めず、代替も無効なため設定は保存されません。", \
+                        "Только чтение: папка программы недоступна для записи, резервный путь отключен - настройки не сохраняются.") \
     X(ST_DIR_FALLBACK,  "存档目录（程序目录不可写，已改用用户目录）：",         \
-                        "Save folder (program folder not writable, using user folder): ") \
-    X(ST_DIR,           "存档目录：",   "Save folder: ")                        \
+                        "Save folder (program folder not writable, using user folder): ", \
+                        "設定フォルダー（書き込めないためユーザーフォルダーを使用）：", \
+                        "Папка профилей (папка программы недоступна, используется папка пользователя): ") \
+    X(ST_DIR,           "存档目录：",   "Save folder: ", "設定フォルダー：", "Папка профилей: ") \
     X(ST_APPLIED_RO,    "已应用（只读模式，未写入磁盘）",                       \
-                        "Applied (read-only, nothing written)")                 \
+                        "Applied (read-only, nothing written)",                 \
+                        "適用しました（読み取り専用のため保存なし）",           \
+                        "Применено (только чтение, на диск не записано)")       \
     X(ST_APPLIED_SAVE0, "已应用，并写入默认存档 save0",                         \
-                        "Applied and written to save0")                         \
+                        "Applied and written to save0",                         \
+                        "適用し、既定の設定 save0 に書き込みました",            \
+                        "Применено и записано в профиль save0")                 \
     X(ST_APPLIED_FAIL,  "已应用，但写入 save0 失败",                            \
-                        "Applied, but writing save0 failed")                    \
-    X(ST_SAVED,         "已保存：",     "Saved: ")                              \
+                        "Applied, but writing save0 failed",                    \
+                        "適用しましたが、save0 への書き込みに失敗しました",      \
+                        "Применено, но записать save0 не удалось")              \
+    X(ST_SAVED,         "已保存：",     "Saved: ", "保存しました：", "Сохранено: ") \
     X(ST_SAVE_FAIL,     "保存失败：无法写入存档目录。",                         \
-                        "Save failed: the save folder is not writable")         \
-    X(ST_LOADED,        "已加载：",     "Loaded: ")                             \
+                        "Save failed: the save folder is not writable",         \
+                        "保存に失敗しました：設定フォルダーに書き込めません。",  \
+                        "Не удалось сохранить: папка профилей недоступна для записи.") \
+    X(ST_LOADED,        "已加载：",     "Loaded: ", "読み込みました：", "Загружено: ") \
     X(ST_LOADED_FAIL_SAVE0, "（但写入 save0 失败）",                            \
-                        " (but writing save0 failed)")                          \
-    X(ST_NEW_SAVE,      "已新建存档：", "New save created: ")                   \
+                        " (but writing save0 failed)",                          \
+                        "（ただし save0 への書き込みに失敗）",                  \
+                        " (но записать save0 не удалось)")                      \
+    X(ST_NEW_SAVE,      "已新建存档：", "New save created: ", "新しい設定を作成しました：", "Создан новый профиль: ") \
     X(ST_RESET,         "已重置为出厂默认并立即生效（未保存）",                 \
-                        "Reset to defaults and applied (not saved)")            \
+                        "Reset to defaults and applied (not saved)",            \
+                        "工場出荷状態に戻して適用しました（未保存）",           \
+                        "Сброшено к заводским настройкам и применено (не сохранено)") \
     /* ---- 消息框 ---- */                                                      \
     X(MB_DIR_HEAD,      "程序所在目录不可写，无法在 exe 旁保存存档。\n\n",      \
-                        "The program folder is not writable, so saves cannot be stored next to the exe.\n\n") \
+                        "The program folder is not writable, so saves cannot be stored next to the exe.\n\n", \
+                        "プログラムのフォルダーに書き込めないため、exe の隣に設定を保存できません。\n\n", \
+                        "Папка программы недоступна для записи, поэтому профили нельзя хранить рядом с exe.\n\n") \
     X(MB_DIR_ASK,       "是否改为保存到：\n",                                   \
-                        "Save to the following folder instead?\n")              \
+                        "Save to the following folder instead?\n",              \
+                        "次のフォルダーに保存しますか：\n",                     \
+                        "Сохранять в следующую папку?\n")                       \
     X(MB_DIR_NO,        "\n\n选择“否”将以只读模式继续运行：\n可以正常使用映射，但设置不会被保存。", \
-                        "\n\nChoosing No runs in read-only mode: mapping still works, but settings are not saved.") \
+                        "\n\nChoosing No runs in read-only mode: mapping still works, but settings are not saved.", \
+                        "\n\n「いいえ」を選ぶと読み取り専用で続行します：\n割り当ては使えますが、設定は保存されません。", \
+                        "\n\nЕсли выбрать \"Нет\", программа продолжит в режиме только чтения:\nназначения клавиш работают, но настройки не сохраняются.") \
     X(MB_AUTOSTART_FAIL, "无法修改开机自启动设置（注册表写入失败）。",          \
-                        "Could not change the auto-start setting (registry write failed)") \
+                        "Could not change the auto-start setting (registry write failed)", \
+                        "スタートアップの設定を変更できません（レジストリ書き込み失敗）。", \
+                        "Не удалось изменить автозапуск (ошибка записи в реестр).") \
     X(MB_READONLY_SAVE, "当前为只读模式，设置无法保存。",                       \
-                        "Read-only mode: settings cannot be saved")             \
+                        "Read-only mode: settings cannot be saved",             \
+                        "読み取り専用モードのため設定を保存できません。",        \
+                        "Режим только чтения: настройки нельзя сохранить.")     \
     X(MB_SAVE_FAIL,     "保存失败：无法写入存档目录。",                         \
-                        "Save failed: the save folder is not writable")         \
-    X(MB_NO_SAVE_FILE,  "存档文件不存在。", "The save file does not exist")     \
+                        "Save failed: the save folder is not writable",         \
+                        "保存に失敗しました：設定フォルダーに書き込めません。",  \
+                        "Не удалось сохранить: папка профилей недоступна для записи.") \
+    X(MB_NO_SAVE_FILE,  "存档文件不存在。", "The save file does not exist", "設定ファイルがありません。", "Файл профиля не найден.") \
     X(MB_LOAD_FAIL,     "存档读取失败，已使用默认值。",                         \
-                        "Failed to read the save file; defaults loaded")        \
+                        "Failed to read the save file; defaults loaded",        \
+                        "設定の読み込みに失敗したため既定値を使います。",        \
+                        "Не удалось прочитать профиль, взяты значения по умолчанию.") \
     X(MB_READONLY_NEW,  "只读模式下无法新建存档。",                             \
-                        "Cannot create a save in read-only mode")               \
+                        "Cannot create a save in read-only mode",               \
+                        "読み取り専用モードでは新しい設定を作成できません。",    \
+                        "В режиме только чтения нельзя создать профиль.")       \
     X(MB_SAVE_FULL,     "存档编号已用尽（save1~save999）。",                    \
-                        "No free save slot left (save1-save999)")               \
+                        "No free save slot left (save1-save999)",               \
+                        "設定番号を使い切りました（save1～save999）。",          \
+                        "Номера профилей закончились (save1-save999).")         \
     X(MB_NEW_FAIL,      "新建存档失败：无法写入存档目录。",                     \
-                        "Failed to create the save: the folder is not writable") \
+                        "Failed to create the save: the folder is not writable", \
+                        "新しい設定の作成に失敗しました：フォルダーに書き込めません。", \
+                        "Не удалось создать профиль: папка недоступна для записи.") \
     X(MB_KEY_CONFLICT,  "该键已被另一种用途占用，请换一个键。",                 \
-                        "This key is already used by another function. Pick another one") \
+                        "This key is already used by another function. Pick another one", \
+                        "このキーは別の用途で使われています。別のキーを選んでください。", \
+                        "Эта клавиша уже занята другой функцией. Выберите другую.") \
     X(MB_QUIT_SAVE,     "设置已修改但还没保存，退出前保存吗？",                 \
-                        "Settings changed but not saved. Save before exiting?") \
+                        "Settings changed but not saved. Save before exiting?", \
+                        "設定が変更されていますが保存されていません。終了前に保存しますか？", \
+                        "Настройки изменены, но не сохранены. Сохранить перед выходом?") \
     X(MB_QUIT_SAVE_FAIL, "保存失败，已取消退出。请检查存档目录后重试。",        \
-                        "Save failed, exit cancelled. Check the save folder and try again") \
+                        "Save failed, exit cancelled. Check the save folder and try again", \
+                        "保存に失敗したため終了を中止しました。設定フォルダーを確認してください。", \
+                        "Не удалось сохранить, выход отменен. Проверьте папку профилей.") \
     X(MB_RESTART,       "切换语言需要重新启动程序才会生效。\n\n现在重启吗？",   \
-                        "The language change takes effect after a restart.\n\nRestart now?") \
+                        "The language change takes effect after a restart.\n\nRestart now?", \
+                        "言語の変更は再起動後に反映されます。\n\n今すぐ再起動しますか？", \
+                        "Смена языка вступит в силу после перезапуска.\n\nПерезапустить сейчас?") \
     X(MB_LANG_RO,       "只读模式下无法保存语言设置。",                         \
-                        "Language cannot be saved in read-only mode")           \
+                        "Language cannot be saved in read-only mode",           \
+                        "読み取り専用モードでは言語設定を保存できません。",      \
+                        "В режиме только чтения язык сохранить нельзя.")        \
     X(MB_RESTART_FAIL,  "自动重启失败，请手动重新打开程序。",                   \
-                        "Failed to restart automatically. Please reopen the program.") \
+                        "Failed to restart automatically. Please reopen the program.", \
+                        "自動再起動に失敗しました。手動で開き直してください。",  \
+                        "Не удалось перезапустить автоматически. Откройте программу вручную.") \
     /* ---- 消息框标题 ---- */                                                  \
-    X(TIP_TITLE,        "提示",         "Info")                                 \
-    X(ERR_TITLE,        "错误",         "Error")                                \
-    X(CONFLICT_TITLE,   "按键冲突",     "Key conflict")                         \
-    X(QUIT_TITLE,       "退出",         "Exit")                                 \
-    X(DIR_TITLE,        "存档目录",     "Save folder")                          \
-    X(LANG_TITLE,       "语言",         "Language")                             \
+    X(TIP_TITLE,        "提示",         "Info",   "情報",     "Информация")     \
+    X(ERR_TITLE,        "错误",         "Error",  "エラー",   "Ошибка")         \
+    X(CONFLICT_TITLE,   "按键冲突",     "Key conflict", "キーの競合", "Конфликт клавиш") \
+    X(QUIT_TITLE,       "退出",         "Exit",   "終了",     "Выход")          \
+    X(DIR_TITLE,        "存档目录",     "Save folder", "設定フォルダー", "Папка профилей") \
+    X(LANG_TITLE,       "语言",         "Language", "言語",   "Язык")           \
     /* ---- 按键名（只翻中文的那几个；字母/数字/F1 保持原样） ---- */           \
-    X(KEY_LEFT,         "左方向",       "Left")                                 \
-    X(KEY_RIGHT,        "右方向",       "Right")                                \
-    X(KEY_UP,           "上方向",       "Up")                                   \
-    X(KEY_DOWN,         "下方向",       "Down")
+    X(KEY_LEFT,         "左方向",       "Left",   "左キー",   "Влево")          \
+    X(KEY_RIGHT,        "右方向",       "Right",  "右キー",   "Вправо")         \
+    X(KEY_UP,           "上方向",       "Up",     "上キー",   "Вверх")          \
+    X(KEY_DOWN,         "下方向",       "Down",   "下キー",   "Вниз")
 
 enum StrId {
-#define LANG_ENUM(id, zh, en) S_##id,
+#define LANG_ENUM(id, zh, en, ja, ru) S_##id,
     LANG_TABLE(LANG_ENUM)
 #undef LANG_ENUM
     S_COUNT
 };
 
 static const char* const kLangZh[S_COUNT] = {
-#define LANG_ZH(id, zh, en) zh,
+#define LANG_ZH(id, zh, en, ja, ru) zh,
     LANG_TABLE(LANG_ZH)
 #undef LANG_ZH
 };
 
 static const char* const kLangEn[S_COUNT] = {
-#define LANG_EN(id, zh, en) en,
+#define LANG_EN(id, zh, en, ja, ru) en,
     LANG_TABLE(LANG_EN)
 #undef LANG_EN
 };
+
+// 日语、俄语：字符合法地落在 GBK 里（假名在 GB2312 第 5 区，西里尔在第 7 区），
+// 所以不需要转 Unicode，直接按 GBK 编进 exe 即可。
+static const char* const kLangJa[S_COUNT] = {
+#define LANG_JA(id, zh, en, ja, ru) ja,
+    LANG_TABLE(LANG_JA)
+#undef LANG_JA
+};
+
+static const char* const kLangRu[S_COUNT] = {
+#define LANG_RU(id, zh, en, ja, ru) ru,
+    LANG_TABLE(LANG_RU)
+#undef LANG_RU
+};
+
+// 语言索引：0=中文 1=英文 2=日语 3=俄语。
+// 用索引而不是比较表指针，是因为下拉框的选中项、config.ini 里的代码
+// 和表之间需要一一对应，索引最直接。
+enum LangId { LANG_ZH = 0, LANG_EN = 1, LANG_JA = 2, LANG_RU = 3, LANG_COUNT = 4 };
+
+static const char* const* kLangTables[LANG_COUNT] = {
+    kLangZh, kLangEn, kLangJa, kLangRu
+};
+
+// 下拉框里显示的名字：用各语言自己的写法，界面语言变了也认得出。
+static const char* const kLangItems[LANG_COUNT] = {
+    "CN 简体中文", "EN English", "JP 日本語", "RU Русский"
+};
+
+// 写进 config.ini 的代码
+static const char* const kLangCodes[LANG_COUNT] = {
+    "zh-CN", "en", "ja", "ru"
+};
+
+static int g_langIndex = LANG_ZH;
 
 // 当前语言表。默认中文；启动时 LoadLanguage() 会按 config.ini 换掉。
 static const char* const* g_langTable = kLangZh;
@@ -700,17 +810,20 @@ void LoadLanguage() {
         g_configPath = userCfg;
     }
 
-    // 目前只认两种：标识以 en 开头就当英文，其余一律回退中文。
-    // 以后接外部语言包时，这里改成"拿标识去匹配 lang\*.ini"。
-    const bool isEnglish = (buf[0] == 'e' || buf[0] == 'E') &&
-                           (buf[1] == 'n' || buf[1] == 'N');
-    if (isEnglish) {
-        g_langTable = kLangEn;
-        g_langCode  = "en";
-    } else {
-        g_langTable = kLangZh;
-        g_langCode  = "zh-CN";
-    }
+    // 按前缀认语言：ja* 日语、ru* 俄语、en* 英语，其余一律回退中文。
+    // 用前缀而不是全等，这样 en-US / ru-RU 这类写法也能认。
+    // 自己转小写，免得为 tolower 再引一个 <cctype>。
+    char lo[3] = { buf[0], buf[1], 0 };
+    for (int i = 0; i < 2; i++)
+        if (lo[i] >= 'A' && lo[i] <= 'Z') lo[i] = (char)(lo[i] + 32);
+
+    if (lo[0] == 'e' && lo[1] == 'n')      g_langIndex = LANG_EN;
+    else if (lo[0] == 'j' && lo[1] == 'a') g_langIndex = LANG_JA;
+    else if (lo[0] == 'r' && lo[1] == 'u') g_langIndex = LANG_RU;
+    else                                   g_langIndex = LANG_ZH;
+
+    g_langTable = kLangTables[g_langIndex];
+    g_langCode  = kLangCodes[g_langIndex];
 }
 
 // 写回语言设置。返回 false 表示写不进去（只读模式 / 目录不可写）。
@@ -2408,12 +2521,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             {
                 HWND hLang = CreateWindowA("COMBOBOX", "",
                     WS_VISIBLE | WS_CHILD | WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL,
-                    M + wideW - 12 - langW, chkY, langW, 120,
+                    M + wideW - 12 - langW, chkY, langW, 160,
                     hwnd, (HMENU)ID_COMBO_LANG, NULL, NULL);
-                SendMessageA(hLang, CB_ADDSTRING, 0, (LPARAM)"CN 简体中文");
-                SendMessageA(hLang, CB_ADDSTRING, 0, (LPARAM)"EN English");
-                SendMessageA(hLang, CB_SETCURSEL,
-                             (g_langTable == kLangEn) ? 1 : 0, 0);
+                // 4 种语言，顺序必须和 kLangItems / kLangCodes 一致
+                for (int i = 0; i < LANG_COUNT; i++)
+                    SendMessageA(hLang, CB_ADDSTRING, 0, (LPARAM)kLangItems[i]);
+                SendMessageA(hLang, CB_SETCURSEL, g_langIndex, 0);
             }
 
             // ---------- 左栏：速度 ----------
@@ -2872,25 +2985,24 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     if (HIWORD(wParam) != CBN_SELCHANGE) break;
 
                     HWND hLang = GetDlgItem(hwnd, ID_COMBO_LANG);
-                    const int  sel    = (int)SendMessageA(hLang, CB_GETCURSEL, 0, 0);
-                    const bool wantEn = (sel == 1);
-                    const bool isEn   = (g_langTable == kLangEn);
+                    const int sel = (int)SendMessageA(hLang, CB_GETCURSEL, 0, 0);
 
-                    if (wantEn == isEn) break;   // 选的就是当前语言，什么都不做
+                    if (sel < 0 || sel >= LANG_COUNT) break;
+                    if (sel == g_langIndex) break;   // 选的就是当前语言
 
                     if (MessageBoxA(hwnd, T(S_MB_RESTART), T(S_LANG_TITLE),
                                     MB_YESNO | MB_ICONQUESTION) != IDYES) {
                         // 不同意重启：下拉框选回当前语言，不写盘、不改状态
-                        SendMessageA(hLang, CB_SETCURSEL, isEn ? 1 : 0, 0);
+                        SendMessageA(hLang, CB_SETCURSEL, g_langIndex, 0);
                         break;
                     }
 
                     // 先落盘再重启：写不进去就别重启，否则重启后又读回旧语言，
                     // 用户会以为"设置根本没生效"。
-                    if (!SaveLanguage(wantEn ? "en" : "zh-CN")) {
+                    if (!SaveLanguage(kLangCodes[sel])) {
                         MessageBoxA(hwnd, T(S_MB_LANG_RO), T(S_ERR_TITLE),
                                     MB_OK | MB_ICONWARNING);
-                        SendMessageA(hLang, CB_SETCURSEL, isEn ? 1 : 0, 0);
+                        SendMessageA(hLang, CB_SETCURSEL, g_langIndex, 0);
                         break;
                     }
 
@@ -3094,8 +3206,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 if (IsWindow(hwnd)) {
                     g_restartRequested = false;
                     HWND hLang = GetDlgItem(hwnd, ID_COMBO_LANG);
-                    if (hLang) SendMessageA(hLang, CB_SETCURSEL,
-                                            (g_langTable == kLangEn) ? 1 : 0, 0);
+                    if (hLang) SendMessageA(hLang, CB_SETCURSEL, g_langIndex, 0);
                 }
                 return 0;
             }
