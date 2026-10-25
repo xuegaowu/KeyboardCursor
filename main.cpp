@@ -61,6 +61,26 @@ using namespace std::chrono;
 constexpr int DEFAULT_TICK_MS = 6;   // 出厂默认，草稿和 ini 缺省值共用这一处
 std::atomic<int> TICK_MS(DEFAULT_TICK_MS);
 
+// ==================== 数值输入范围 ====================
+// 八项数值的合法范围只在这里定义一次。
+// 以前"界面校验"（ReadEditsIntoDraft）和"读档钳制"（LoadFromFile）各写一份
+// 硬编码数字，改一处忘另一处就会出现"应用时接受了、重启后却被截断"的假象。
+// 两处语义仍然不同（界面是回退到上一个有效值，读档是截断到边界），
+// 但边界本身共用这一份。
+namespace Limit {
+    // 速度类四项：单位是 px/拍，允许小数和负值（负 = 反向）
+    constexpr double SPEED_LO = -1000.0, SPEED_HI = 1000.0;   // 初始速度
+    constexpr double ACCEL_LO =  -500.0, ACCEL_HI =  500.0;   // 加速度
+    constexpr double MAXSP_LO =     0.0, MAXSP_HI = 2000.0;   // 速度上限（大小，不接受负值）
+    constexpr double MUL_LO   = -1000.0, MUL_HI   = 1000.0;   // 加速倍率
+
+    // 滚轮与节拍三项：整数
+    constexpr int WIVL_LO = 1, WIVL_HI = 10000;   // 滚轮间隔（ms）
+    constexpr int WSPD_LO = 1, WSPD_HI =   260;   // 滚轮速度（档/次）
+    constexpr int WMUL_LO = 1, WMUL_HI =   260;   // 滚轮加速（倍）
+    constexpr int TICK_LO = 1, TICK_HI =   300;   // 刷新间隔（ms）
+}
+
 // ==================== 控件 ID ====================
 // 每个子控件在窗口内的唯一标识。数字随意但须保证不重复，
 // 因为 WM_COMMAND 通过 LOWORD(wParam) 判断是哪个控件发出的通知。
@@ -82,6 +102,7 @@ std::atomic<int> TICK_MS(DEFAULT_TICK_MS);
 #define ID_BTN_KEY_WHEELUP      3018   // 上滚
 #define ID_BTN_KEY_WHEELDOWN    3019   // 下滚
 #define ID_BTN_KEY_BOOST        3028   // 加速键（按住时乘加速倍率）
+#define ID_BTN_KEY_WHEELBOOST   3029   // 滚轮加速键（按住时滚轮乘滚轮加速）
 #define ID_BTN_SWITCH1          3021   // 开关键1
 #define ID_BTN_SWITCH2          3022   // 开关键2
 #define ID_BTN_SWITCH3          3023   // 开关键3
@@ -123,6 +144,30 @@ std::atomic<double> SPEED_MULTIPLIER(3.0); // 按住加速键时的速度倍率�
 std::atomic<int> WHEEL_INTERVAL(80);      // 两次滚轮事件的最小间隔（ms）
 std::atomic<int> WHEEL_SPEED(1);          // 每次滚动的"档位"数
 std::atomic<int> WHEEL_SPEED_MULTIPLIER(3); // 按住加速键时的滚轮倍率
+
+// ==================== 滚轮的三层限制 ====================
+// 滚轮档位是"一次事件要滚多少行"，放开到几百档之后光靠"范围"挡不住
+// 目标程序被压垮，于是分成三层：单条消息 / 单次事件 / 每秒总量。
+
+// L1：一条 WM_MOUSEWHEEL 能带的最大档位。
+// 消息里的累计量是 16 位有符号数（GET_WHEEL_DELTA_WPARAM 就是
+// (short)HIWORD(wParam)），上限 32767，即单条最多 273 档；
+// 超过这个数会被当成负数，表现为"反向滚、幅度还不对"。
+// 取 200 档（24000）留足余量。
+constexpr int NOTCH_PER_INPUT = 200;
+
+// L2：单次滚轮事件的档位总量上限。
+// 速度 260 × 加速 260 = 67600 档，拆成 338 条消息一次发出去，
+// 目标程序要在那一帧处理 67600 行滚动 —— 等于卡死。
+// 3000 档 = 15 条消息，一帧内可以承受；想再大就必须接受"卡一下"。
+constexpr int MAX_NOTCH_PER_EVENT = 3000;
+
+// L3：全局平均速率上限（档/秒）。
+// L2 只管一次事件，挡不住"事件发生得很密"：刷新间隔 1 + 滚轮间隔 1 时
+// 每秒上千次事件，每次 3000 档 → 每秒上百万档，目标程序冻住几秒。
+// 60000 档/秒 ≈ 每秒 500 次标准滚轮，这个量级下程序会明显掉帧，
+// 但不会永久无响应 —— 这是有意选在"放开"和"保险"之间的值。
+constexpr int MAX_NOTCH_PER_SECOND = 60000;
 
 // 按键映射（均为虚拟键码 VK_*，字母直接用其 ASCII 值）
 // 用 atomic 是为了让捕获阶段（钩子线程）写入、控制线程读取时看不到半新半旧的值。
@@ -166,6 +211,12 @@ std::atomic<bool> keyO(false), keyL(false), keyM(false);
 // 名字不再叫 keyShift，因为现在已经可以改成任意键。
 std::atomic<bool> keyBoostDown(false);
 
+// 滚轮加速键：和上面的加速键是**两个独立角色**。
+// 默认值同样是 Shift，所以升级后的手感不变；但用户可以把它改到别的键上，
+// 实现"Shift 只加速移动、滚轮另有一个加速键"。
+std::atomic<int>  keyWheelBoost(VK_SHIFT);
+std::atomic<bool> wheelBoostDown(false);
+
 // CapsLock 被设成组合键后会被钩子吞掉，系统就不再生效、也不再更新它的状态，
 // 所以由钩子自己记一份按下/松开，供 IsKeyDown 判定组合键使用。
 std::atomic<bool> capsDown(false);
@@ -179,7 +230,7 @@ std::atomic<bool> capsDown(false);
 enum KeySlot {
     SLOT_UP, SLOT_DOWN, SLOT_LEFT, SLOT_RIGHT,
     SLOT_LCLICK, SLOT_RCLICK, SLOT_MCLICK,
-    SLOT_WHEELUP, SLOT_WHEELDOWN, SLOT_BOOST, SLOT_CAPS,
+    SLOT_WHEELUP, SLOT_WHEELDOWN, SLOT_BOOST, SLOT_WHEELBOOST, SLOT_CAPS,
     SLOT_COUNT
 };
 std::atomic<DWORD> g_lastKeyDown[SLOT_COUNT];
@@ -227,7 +278,8 @@ struct ConfigDraft {
     int keyUp, keyDown, keyLeft, keyRight;                          // 4 个移动键
     int keyLClick, keyRClick, keyMClick;                            // 3 个鼠标键
     int keyWheelUp, keyWheelDown;                                   // 2 个滚轮键
-    int boostKey;                                                   // 加速键
+    int boostKey;                                                   // 加速键（移动）
+    int wheelBoostKey;                                              // 滚轮加速键
     int switch1, switch2, switch3, switch4;                         // 开关组合键
     int switchMode;                                                 // 组合键模式：0=切换，1=按住
     bool intercept;                                                 // 启用按键拦截
@@ -326,6 +378,7 @@ void UpdateAllButtonText(HWND hwnd) {
     UpdateButtonText(hwnd, ID_BTN_KEY_WHEELUP, g_draft.keyWheelUp);
     UpdateButtonText(hwnd, ID_BTN_KEY_WHEELDOWN, g_draft.keyWheelDown);
     UpdateButtonText(hwnd, ID_BTN_KEY_BOOST, g_draft.boostKey);
+    UpdateButtonText(hwnd, ID_BTN_KEY_WHEELBOOST, g_draft.wheelBoostKey);
     UpdateButtonText(hwnd, ID_BTN_SWITCH1, g_draft.switch1);
     UpdateButtonText(hwnd, ID_BTN_SWITCH2, g_draft.switch2);
     UpdateButtonText(hwnd, ID_BTN_SWITCH3, g_draft.switch3);
@@ -452,6 +505,8 @@ void CreateSaveFile(const std::string& name) {
         WritePrivateProfileStringA("Keys", "keyWheelUp", "79", path.c_str());
         WritePrivateProfileStringA("Keys", "keyWheelDown", "76", path.c_str());
         WritePrivateProfileStringA("Keys", "boostKey", "16", path.c_str());
+        // 滚轮加速键也是后加的：新档直接写默认值，免得靠读档缺省兜底。
+        WritePrivateProfileStringA("Keys", "wheelBoostKey", "16", path.c_str());
         WritePrivateProfileStringA("Switch", "switchKey1", "20", path.c_str());
         WritePrivateProfileStringA("Switch", "switchKey2", "0", path.c_str());
         WritePrivateProfileStringA("Switch", "switchKey3", "0", path.c_str());
@@ -548,6 +603,9 @@ void DraftDefaults() {
     g_draft.keyWheelUp   = 'O';
     g_draft.keyWheelDown = 'L';
     g_draft.boostKey     = VK_SHIFT;
+    // 滚轮加速键默认也是 Shift：与旧版本行为一致（当时 Shift 同时加速移动和滚轮）。
+    // 想区分开的话，把它改成别的键即可。
+    g_draft.wheelBoostKey = VK_SHIFT;
 
     g_draft.switch1 = VK_CAPITAL;
     g_draft.switch2 = 0;
@@ -581,6 +639,7 @@ void DraftFromApplied() {
     g_draft.keyWheelUp   = keyWheelUp.load();
     g_draft.keyWheelDown = keyWheelDown.load();
     g_draft.boostKey     = keyBoost.load();
+    g_draft.wheelBoostKey = keyWheelBoost.load();
 
     g_draft.switch1 = switchKey1.load();
     g_draft.switch2 = switchKey2.load();
@@ -615,6 +674,7 @@ void ApplyDraft() {
     keyWheelUp   = g_draft.keyWheelUp;
     keyWheelDown = g_draft.keyWheelDown;
     keyBoost     = g_draft.boostKey;
+    keyWheelBoost = g_draft.wheelBoostKey;
 
     switchKey1 = g_draft.switch1;
     switchKey2 = g_draft.switch2;
@@ -648,51 +708,61 @@ void ReadEditsIntoDraft(HWND hwnd) {
     char buf[32];
     int v;
 
-    // 初始速度：-100~100。符号决定方向（负 = 反向），0 = 静止起步。
+    // 初始速度：符号决定方向（负 = 反向），0 = 静止起步。
+    // 单位是"每拍像素数"，所以实际速度还受刷新间隔影响（见下方 tickMs 注释）。
     GetDlgItemTextA(hwnd, ID_EDIT_SPEED, buf, 32);
     double spd = atof(buf);
-    if (spd >= -100.0 && spd <= 100.0) g_draft.moveSpeed = spd;
+    if (spd >= Limit::SPEED_LO && spd <= Limit::SPEED_HI) g_draft.moveSpeed = spd;
     else SetDlgItemTextA(hwnd, ID_EDIT_SPEED, FormatSpeed(g_draft.moveSpeed).c_str());
 
-    // 加速度：-50~50。负值 = 减速（减到 0 停住，不会自己反向）。
+    // 加速度：负值 = 减速（减到 0 停住，不会自己反向）。
     GetDlgItemTextA(hwnd, ID_EDIT_ACCEL, buf, 32);
     double acc = atof(buf);
-    if (acc >= -50.0 && acc <= 50.0) g_draft.moveAccel = acc;
+    if (acc >= Limit::ACCEL_LO && acc <= Limit::ACCEL_HI) g_draft.moveAccel = acc;
     else SetDlgItemTextA(hwnd, ID_EDIT_ACCEL, FormatSpeed(g_draft.moveAccel).c_str());
 
-    // 速度上限：0~200。不小于初速时是天花板，小于初速时当下限用
+    // 速度上限：不小于初速时是天花板，小于初速时当下限用
     // （速度不会低于它，上界改成初速）——旧配置的手感因此得以保留。
+    // 它表示"大小"，所以不接受负值。
     GetDlgItemTextA(hwnd, ID_EDIT_MAXSPEED, buf, 32);
     double mx = atof(buf);
-    if (mx >= 0.0 && mx <= 200.0) g_draft.moveMaxSpeed = mx;
+    if (mx >= Limit::MAXSP_LO && mx <= Limit::MAXSP_HI) g_draft.moveMaxSpeed = mx;
     else SetDlgItemTextA(hwnd, ID_EDIT_MAXSPEED, FormatSpeed(g_draft.moveMaxSpeed).c_str());
 
-    // 加速倍率：-100~100。负值 = 按住时翻转方向；0 = 刹车。
+    // 加速倍率：负值 = 按住时翻转方向；0 = 刹车。
+    // 它同时参与初速和上限的计算，cap 用 |倍率|，所以负值才是"反向"而不是"反向且变慢"。
     GetDlgItemTextA(hwnd, ID_EDIT_SPEED_MUL, buf, 32);
     double mulV = atof(buf);
-    if (mulV >= -100.0 && mulV <= 100.0) g_draft.speedMul = mulV;
+    if (mulV >= Limit::MUL_LO && mulV <= Limit::MUL_HI) g_draft.speedMul = mulV;
     else SetDlgItemTextA(hwnd, ID_EDIT_SPEED_MUL, FormatSpeed(g_draft.speedMul).c_str());
 
+    // 下面四项是整数：用 atoi 解析（小数会被截断），越界回退到草稿里的原值。
     GetDlgItemTextA(hwnd, ID_EDIT_WHEEL_INTERVAL, buf, 32);
     v = atoi(buf);
-    if (v >= 1 && v <= 10000) g_draft.wheelInterval = v;
+    if (v >= Limit::WIVL_LO && v <= Limit::WIVL_HI) g_draft.wheelInterval = v;
     else SetDlgItemInt(hwnd, ID_EDIT_WHEEL_INTERVAL, g_draft.wheelInterval, FALSE);
 
+    // 注意：滚轮速度/加速填得再大，单次实际发出的档位仍受
+    // MAX_NOTCH_PER_EVENT(3000) 截断，所以"速度 × 加速 > 3000"时
+    // 多出来的部分不会生效（速度 ≥ 12 时，加速填满 260 就会被截断）。
     GetDlgItemTextA(hwnd, ID_EDIT_WHEEL_SPEED, buf, 32);
     v = atoi(buf);
-    if (v >= 1 && v <= 100) g_draft.wheelSpeed = v;
+    if (v >= Limit::WSPD_LO && v <= Limit::WSPD_HI) g_draft.wheelSpeed = v;
     else SetDlgItemInt(hwnd, ID_EDIT_WHEEL_SPEED, g_draft.wheelSpeed, FALSE);
 
     GetDlgItemTextA(hwnd, ID_EDIT_WHEEL_MUL, buf, 32);
     v = atoi(buf);
-    if (v >= 1 && v <= 100) g_draft.wheelMul = v;
+    if (v >= Limit::WMUL_LO && v <= Limit::WMUL_HI) g_draft.wheelMul = v;
     else SetDlgItemInt(hwnd, ID_EDIT_WHEEL_MUL, g_draft.wheelMul, FALSE);
 
-    // 刷新间隔：3~30ms。再快屏幕也刷不出来、只是白唤醒 CPU；
-    // 再慢光标会明显拖影。越界一律回退到草稿里的原值。
+    // 刷新间隔：决定控制线程多久醒一次。
+    // 1ms 已经低于多数显示器的刷新周期，再快只是白唤醒 CPU；
+    // 300ms 则光标会明显拖影。越界一律回退到草稿里的原值。
+    // 提醒：初始速度的单位是 px/拍，把这里从 6 改到 1，
+    // 同一个速度值的实际速度会变成 6 倍，调参时要一起看。
     GetDlgItemTextA(hwnd, ID_EDIT_TICK, buf, 32);
     v = atoi(buf);
-    if (v >= 3 && v <= 30) g_draft.tickMs = v;
+    if (v >= Limit::TICK_LO && v <= Limit::TICK_HI) g_draft.tickMs = v;
     else SetDlgItemInt(hwnd, ID_EDIT_TICK, g_draft.tickMs, FALSE);
 
     g_updatingUI = false;
@@ -804,6 +874,8 @@ bool SaveToFile(const std::string& name) {
     WritePrivateProfileStringA("Keys", "keyWheelDown", buf, path.c_str());
     sprintf_s(buf, "%d", keyBoost.load());
     WritePrivateProfileStringA("Keys", "boostKey", buf, path.c_str());
+    sprintf_s(buf, "%d", keyWheelBoost.load());
+    WritePrivateProfileStringA("Keys", "wheelBoostKey", buf, path.c_str());
 
     // 组合键：0 表示该槽位空，读回时按同样规则解释。
     sprintf_s(buf, "%d", switchKey1.load());
@@ -839,6 +911,15 @@ bool SaveToFile(const std::string& name) {
 //   LOAD_FAILED  文件存在但读不出内容（损坏 / 被占用 / 没权限）
 enum LoadResult { LOAD_OK, LOAD_MISSING, LOAD_FAILED };
 
+// ini 里的整数没有任何范围保证：可能被手改成 0、负数或超大值。
+// GetPrivateProfileIntA 的返回值是 UINT，负数字符串会被解释成大数，
+// 所以读出来必须自己钳一遍，不能直接塞进 atomic。
+static int ClampIniInt(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
 // 从指定文件读设置
 // 读完后会自动同步到 UI 控件，因此调用方不需要再手动刷新界面。
 LoadResult LoadFromFile(const std::string& name) {
@@ -855,46 +936,58 @@ LoadResult LoadFromFile(const std::string& name) {
     }
 
     // 缺省值使用程序的"出厂默认"，这样即便存档缺失/损坏也能保持可用。
-    // 初始速度：允许负数（方向反转）和小数，钳到 -100~100。
+    // 这里的越界处理是"截断到边界"（不是回退）：读档时没有"上一个有效值"可用。
+    // 边界与界面校验共用 Limit 里的一份定义，避免两边对不上。
+
+    // 初始速度：允许负数（方向反转）和小数。
     char speedBuf[32] = {};
     GetPrivateProfileStringA("Speed", "MOVE_SPEED", "1.5", speedBuf, 32, path.c_str());
     double spd = atof(speedBuf);
-    if (spd < -100.0) spd = -100.0;
-    if (spd >  100.0) spd =  100.0;
+    if (spd < Limit::SPEED_LO) spd = Limit::SPEED_LO;
+    if (spd > Limit::SPEED_HI) spd = Limit::SPEED_HI;
     MOVE_SPEED = spd;
 
-    // 加速度：缺省 0.02。负值 = 减速，钳到 -50~50。
+    // 加速度：缺省 0.02。负值 = 减速。
     char accBuf[32] = {};
     GetPrivateProfileStringA("Speed", "MOVE_ACCEL", "0.02", accBuf, 32, path.c_str());
     double accV = atof(accBuf);
-    if (accV < -50.0) accV = -50.0;
-    if (accV >  50.0) accV =  50.0;
+    if (accV < Limit::ACCEL_LO) accV = Limit::ACCEL_LO;
+    if (accV > Limit::ACCEL_HI) accV = Limit::ACCEL_HI;
     MOVE_ACCEL = accV;
 
-    // 速度上限：缺省 5，钳到 0~200。小于初速时当下限用，不小于时当天花板。
+    // 速度上限：缺省 5。小于初速时当下限用，不小于时当天花板。
     char maxBuf[32] = {};
     GetPrivateProfileStringA("Speed", "MOVE_MAX_SPEED", "5", maxBuf, 32, path.c_str());
     double maxV = atof(maxBuf);
-    if (maxV < 0.0) maxV = 0.0;
-    if (maxV > 200.0) maxV = 200.0;
+    if (maxV < Limit::MAXSP_LO) maxV = Limit::MAXSP_LO;
+    if (maxV > Limit::MAXSP_HI) maxV = Limit::MAXSP_HI;
     MOVE_MAX_SPEED = maxV;
 
-    // 加速倍率：允许小数和负值，钳到 -100~100。负值 = 按住时翻转方向。
+    // 加速倍率：允许小数和负值。负值 = 按住时翻转方向。
     char mulBuf[32] = {};
     GetPrivateProfileStringA("Speed", "SPEED_MULTIPLIER", "3", mulBuf, 32, path.c_str());
     double mulV = atof(mulBuf);
-    if (mulV < -100.0) mulV = -100.0;
-    if (mulV >  100.0) mulV =  100.0;
+    if (mulV < Limit::MUL_LO) mulV = Limit::MUL_LO;
+    if (mulV > Limit::MUL_HI) mulV = Limit::MUL_HI;
     SPEED_MULTIPLIER = mulV;
-    WHEEL_INTERVAL = GetPrivateProfileIntA("Speed", "WHEEL_INTERVAL", 80, path.c_str());
-    WHEEL_SPEED = GetPrivateProfileIntA("Speed", "WHEEL_SPEED", 1, path.c_str());
-    WHEEL_SPEED_MULTIPLIER = GetPrivateProfileIntA("Speed", "WHEEL_SPEED_MULTIPLIER", 3, path.c_str());
 
-    // 刷新间隔必须在这里就钳住：如果 ini 被手改成 0 或负数，
+    // 滚轮三项以前完全没有钳制，ini 被改成 0 时 WHEEL_INTERVAL=0 会让
+    // "距上次超过 0ms"恒成立 —— 每个 tick 都发一次滚轮。补上。
+    WHEEL_INTERVAL = ClampIniInt(
+        (int)GetPrivateProfileIntA("Speed", "WHEEL_INTERVAL", 80, path.c_str()),
+        Limit::WIVL_LO, Limit::WIVL_HI);
+    WHEEL_SPEED = ClampIniInt(
+        (int)GetPrivateProfileIntA("Speed", "WHEEL_SPEED", 1, path.c_str()),
+        Limit::WSPD_LO, Limit::WSPD_HI);
+    WHEEL_SPEED_MULTIPLIER = ClampIniInt(
+        (int)GetPrivateProfileIntA("Speed", "WHEEL_SPEED_MULTIPLIER", 3, path.c_str()),
+        Limit::WMUL_LO, Limit::WMUL_HI);
+
+    // 刷新间隔必须在这里就钳住：如果 ini 被手改成 0，
     // Wait(0) 会退化成忙等死循环，把 CPU 拉满。
-    TICK_MS = GetPrivateProfileIntA("Speed", "tickMs", DEFAULT_TICK_MS, path.c_str());
-    if (TICK_MS.load() < 3)  TICK_MS = 3;
-    if (TICK_MS.load() > 30) TICK_MS = 30;
+    TICK_MS = ClampIniInt(
+        (int)GetPrivateProfileIntA("Speed", "tickMs", DEFAULT_TICK_MS, path.c_str()),
+        Limit::TICK_LO, Limit::TICK_HI);
 
     keyUp = GetPrivateProfileIntA("Keys", "keyUp", 69, path.c_str());
     keyDown = GetPrivateProfileIntA("Keys", "keyDown", 68, path.c_str());
@@ -907,6 +1000,8 @@ LoadResult LoadFromFile(const std::string& name) {
     keyWheelDown = GetPrivateProfileIntA("Keys", "keyWheelDown", 76, path.c_str());
     // 加速键：老存档没有这个键时默认 Shift(16)，行为和旧版本一致
     keyBoost = GetPrivateProfileIntA("Keys", "boostKey", 16, path.c_str());
+    // 滚轮加速键：旧存档同样没有，缺省 16 —— 这样"按 Shift 加速滚轮"的老手感不变。
+    keyWheelBoost = GetPrivateProfileIntA("Keys", "wheelBoostKey", 16, path.c_str());
 
     switchKey1 = GetPrivateProfileIntA("Switch", "switchKey1", 20, path.c_str());
     switchKey2 = GetPrivateProfileIntA("Switch", "switchKey2", 0, path.c_str());
@@ -936,11 +1031,13 @@ bool IsSwitchMember(int vk) {
 
 // ==================== 判断是否需要拦截 ====================
 bool ShouldIntercept(DWORD vkCode) {
-    // CapsLock 参与组合键、或充当加速键时必须吞掉：不吞的话按一下就把
+    // CapsLock 参与组合键、或充当任一种加速键时必须吞掉：不吞的话按一下就把
     // 大小写翻转了。这里特意不受 isEnabled 影响 —— 否则"禁用"状态下按它
     // 仍会切大小写；但仍然尊重用户手动关掉"启用按键拦截"的选择。
     // 加速键的状态是钩子自己记的，吞掉不影响它工作。
-    if (vkCode == VK_CAPITAL && (IsSwitchMember((int)vkCode) || vkCode == (DWORD)keyBoost.load()))
+    if (vkCode == VK_CAPITAL &&
+        (IsSwitchMember((int)vkCode) || vkCode == (DWORD)keyBoost.load() ||
+         vkCode == (DWORD)keyWheelBoost.load()))
         return interceptEnabled.load();
 
     // 总开关未启用、或用户手动关闭拦截时，一律放行。
@@ -997,6 +1094,15 @@ void SetKeyState(DWORD vkCode, bool down) {
     else if (vkCode == keyBoost.load()) {
         keyBoostDown = down;
         if (down) g_lastKeyDown[SLOT_BOOST] = now;
+    }
+
+    // 滚轮加速键**单独一个 if**，不能并入上面的 else-if 链：
+    // 默认两个加速键都是 Shift，写成 else-if 的话 Shift 会先命中"加速键"分支，
+    // 滚轮加速就永远不会被置位 —— 默认配置下滚轮加速直接失效。
+    // 两者相等时这里会各记一份状态，效果正是"一个键同时加速移动和滚轮"。
+    if (vkCode == keyWheelBoost.load()) {
+        wheelBoostDown = down;
+        if (down) g_lastKeyDown[SLOT_WHEELBOOST] = now;
     }
 }
 
@@ -1107,13 +1213,43 @@ void MouseMiddleUp() {
     SendInput(1, &input, sizeof(INPUT));
 }
 
-// delta 为正向上滚、为负向下滚；标准滚轮一圈等于 WHEEL_DELTA(=120)。
-void MouseWheel(int delta) {
-    INPUT input = {0};
-    input.type = INPUT_MOUSE;
-    input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-    input.mi.mouseData = delta;
-    SendInput(1, &input, sizeof(INPUT));
+// 一次滚轮事件要发出的"档位"数（1 档 = 标准滚轮一格 = WHEEL_DELTA）。
+// 正数向上滚、负数向下滚。调用方负责把数量压到 MAX_NOTCH_PER_EVENT 以内。
+//
+// 为什么要拆成多条 INPUT：一条 WM_MOUSEWHEEL 的累计量在消息里是
+// 16 位有符号数（GET_WHEEL_DELTA_WPARAM 展开就是 (short)HIWORD(wParam)），
+// 上限 32767。超过这个数会被当成负数 —— 表现为"方向反了、幅度还不对"。
+// 所以按 NOTCH_PER_INPUT(200 档 = 24000) 切块，整组用一次 SendInput 发出去。
+void MouseWheelNotches(int notches) {
+    if (notches == 0) return;
+
+    const int dir = (notches > 0) ? 1 : -1;
+    int left = (notches > 0) ? notches : -notches;
+
+    // 数组长度按"最坏情况"给：3000 / 200 + 1 = 16。
+    // 必须整体清零——INPUT 里有 dx/dy/dwExtraInfo 等字段，
+    // 留着栈上的垃圾值可能让 SendInput 拒绝整批事件。
+    INPUT inputs[MAX_NOTCH_PER_EVENT / NOTCH_PER_INPUT + 1] = {};
+
+    int n = 0;
+    const int cap = (int)(sizeof(inputs) / sizeof(inputs[0]));
+    while (left > 0 && n < cap) {
+        int chunk = (left > NOTCH_PER_INPUT) ? NOTCH_PER_INPUT : left;
+        inputs[n].type = INPUT_MOUSE;
+        inputs[n].mi.dwFlags = MOUSEEVENTF_WHEEL;
+        inputs[n].mi.mouseData = (DWORD)(dir * chunk * WHEEL_DELTA);
+        left -= chunk;
+        n++;
+    }
+
+    if (n > 0) SendInput((UINT)n, inputs, sizeof(INPUT));
+}
+
+// 按 L3 速率上限折算：发出 notches 档之后要冷却多少毫秒。
+// 向上取整 —— 宁可少发一点，也别超发。
+static int NotchCooldownMs(int notches) {
+    if (notches <= 0) return 0;
+    return (notches * 1000 + MAX_NOTCH_PER_SECOND - 1) / MAX_NOTCH_PER_SECOND;
 }
 
 // 使用"绝对坐标"模式：0~65535 映射到整个虚拟桌面（多显示器时包含所有屏）。
@@ -1290,6 +1426,9 @@ void WatchdogKeyStates(bool injectionBlocked) {
         keyL = false;
     if (keyBoostDown.load() && KeyLooksReleased(keyBoost.load(), g_lastKeyDown[SLOT_BOOST].load(), injectionBlocked))
         keyBoostDown = false;
+    if (wheelBoostDown.load() &&
+        KeyLooksReleased(keyWheelBoost.load(), g_lastKeyDown[SLOT_WHEELBOOST].load(), injectionBlocked))
+        wheelBoostDown = false;
     if (capsDown.load() && KeyLooksReleased(VK_CAPITAL, g_lastKeyDown[SLOT_CAPS].load(), injectionBlocked))
         capsDown = false;
 }
@@ -1299,6 +1438,12 @@ void WatchdogKeyStates(bool injectionBlocked) {
 void MouseControlThread() {
     bool lastToggleState = false;   // 上一轮的组合键状态，用于"边沿"识别
     auto lastWheelTime = steady_clock::now();   // 滚轮节流（限速）的时间戳
+
+    // 滚轮的总速率闸门（L3）：下一次允许发滚轮的最早时刻。
+    // 和上面的 lastWheelTime 分开维护：一个管"用户设定的最小间隔"，
+    // 一个管"档位总量换算出来的最快时刻"。混用会让
+    // "间隔 80ms + 冷却 500ms" 变成实际 580ms，参数含义就乱了。
+    auto wheelBudgetUntil = steady_clock::now();
 
     // 亚像素余量：速度可以是小数，但 SetCursorPos 只收整数。
     // 每帧把带小数的位移累加进来，只走整数部分，小数留到下一帧。
@@ -1491,19 +1636,35 @@ void MouseControlThread() {
         if (m) MouseMiddleDown(); else MouseMiddleUp();
 
         // ---------- 滚轮 ----------
-        // 按时间节流：两次事件至少间隔 WHEEL_INTERVAL 毫秒。
-        // 这样避免按住滚轮键时"一帧几十个事件"导致页面疯狂滚动。
+        // 三道闸门一起判断：
+        //   userOk —— 距上次事件至少 WHEEL_INTERVAL 毫秒（用户设定）
+        //   rateOk —— 上次发出的档位已经"冷却"完（L3 总速率上限）
+        // 两者取交集，各自含义独立。
         auto now = steady_clock::now();
         auto elapsed = duration_cast<milliseconds>(now - lastWheelTime).count();
+        const bool userOk = elapsed >= WHEEL_INTERVAL.load();
+        const bool rateOk = now >= wheelBudgetUntil;
 
-        if ((o || l) && elapsed >= WHEEL_INTERVAL.load()) {
+        if ((o || l) && userOk && rateOk) {
             int speed = WHEEL_SPEED.load();
-            if (keyBoostDown.load()) speed *= WHEEL_SPEED_MULTIPLIER.load();
+            // 只认滚轮加速键，不认"加速键"：两者默认都是 Shift（手感不变），
+            // 但把滚轮加速键改到别的键上之后，Shift 就只加速移动、不再影响滚轮。
+            if (wheelBoostDown.load()) speed *= WHEEL_SPEED_MULTIPLIER.load();
 
-            if (o) MouseWheel(WHEEL_DELTA * speed);
-            if (l) MouseWheel(-WHEEL_DELTA * speed);
+            // L2：单次事件的档位上限。速度 260 × 加速 260 = 67600 档，
+            // 一次交出去等于让目标程序在那一帧滚 67600 行。
+            if (speed > MAX_NOTCH_PER_EVENT) speed = MAX_NOTCH_PER_EVENT;
+
+            // 上下滚同时按住时是两次事件，冷却要按两次的量算，
+            // 否则"两个键一起按"能绕过 L3 的速率上限。
+            int events = (o ? 1 : 0) + (l ? 1 : 0);
+
+            if (o) MouseWheelNotches(speed);
+            if (l) MouseWheelNotches(-speed);
 
             lastWheelTime = now;
+            // L3：按实际发出的档位把总速率闸门往后推。
+            wheelBudgetUntil = now + milliseconds(NotchCooldownMs(speed * events));
         }
 
         // ---------- 节拍等待 ----------
@@ -1541,6 +1702,8 @@ void RemoveTrayIcon() {
 // ==================== 重置 ====================
 // 只把草稿恢复成出厂默认并刷新界面，**不**推进内存、**不**写盘。
 // 想让它生效得再点"应用"，想让它持久化得点"保存" —— 和其他修改走同一套规则。
+// 例外：Esc+0 快捷重置（WM_RESET）调完这里之后会立刻 ApplyDraft，
+// 因为它的用途是"快速恢复"，详见该 case 里的注释。
 void ResetDraftAndUI(HWND hwnd) {
     DraftDefaults();
     RefreshUIFromDraft(hwnd);
@@ -1935,8 +2098,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 vx, 302, 64, 22, hwnd, (HMENU)ID_EDIT_TICK, NULL, NULL);
 
             // 应用 / 重置都是全量操作：它们推进的是整份草稿
-            // （速度/加速度/上限 + Shift 倍率 + 滚轮 3 项 + 刷新间隔
-            //   + 9 个映射 + 4 个组合键 + 2 个复选框），
+            // （速度/加速度/上限 + 移动加速倍率 + 滚轮 3 项 + 刷新间隔
+            //   + 11 个映射/加速键 + 4 个组合键 + 2 个复选框），
             // 所以不放在本组里，统一挪到窗口底部。
 
             // ---------- 右栏：按键映射 ----------
@@ -1949,7 +2112,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             const int kx2 = col2 + 12 + 136;     // 第二列标签 x
             const int bw  = 76;                  // 按键按钮宽
 
-            // 10 个映射的创建逻辑完全一样，用 lambda 收口，避免复制 10 遍。
+            // 11 个映射/加速键的创建逻辑完全一样，用 lambda 收口，避免复制 11 遍。
             // 按钮初始文字取当前映射值，和 UpdateAllButtonText 的结果一致。
             auto addKeyRow = [&](int x, int y, const char* label, int btnId, int vk) {
                 CreateWindowA("STATIC", label,
@@ -1969,8 +2132,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             addKeyRow(kx1, 190, "上滚:", ID_BTN_KEY_WHEELUP,   keyWheelUp.load());
             addKeyRow(kx2, 190, "下滚:", ID_BTN_KEY_WHEELDOWN, keyWheelDown.load());
             addKeyRow(kx1, 218, "中键:", ID_BTN_KEY_MCLICK,    keyMClick.load());
-            // 加速键：按住它移动/滚轮会乘上"加速倍率"
+            // 加速键：按住它只影响"移动速度"，不再管滚轮（滚轮有自己的键）
             addKeyRow(kx2, 218, "加速:", ID_BTN_KEY_BOOST,     keyBoost.load());
+
+            // 滚轮加速键：按住时滚轮档位乘"滚轮加速"。
+            // 标签是 4 个字 + 冒号，addKeyRow 固定的 44px 会被截断，
+            // 所以这一行单独创建：标签 76px，按钮从 +80 开始。
+            // 该行只有这一个控件，第二列是空的，因此可以放心超过
+            // 其它行"第一列只占 136px"的限制（80+76=156，仍远小于组宽 292）。
+            CreateWindowA("STATIC", "滚轮加速:",
+                WS_VISIBLE | WS_CHILD, kx1, 246 + 3, 76, 18, hwnd, NULL, NULL, NULL);
+            CreateWindowA("BUTTON", GetKeyName(keyWheelBoost.load()).c_str(),
+                WS_VISIBLE | WS_CHILD, kx1 + 80, 246, bw, ctlH,
+                hwnd, (HMENU)(INT_PTR)ID_BTN_KEY_WHEELBOOST, NULL, NULL);
 
             // ---------- 开关组合键：跨两栏一整条 ----------
             // 高度 96：第一行 4 个槽位 + 清空，第二行两个模式单选按钮。
@@ -2119,6 +2293,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 case ID_BTN_KEY_WHEELUP:
                 case ID_BTN_KEY_WHEELDOWN:
                 case ID_BTN_KEY_BOOST:
+                case ID_BTN_KEY_WHEELBOOST:
                 case ID_BTN_SWITCH1:
                 case ID_BTN_SWITCH2:
                 case ID_BTN_SWITCH3:
@@ -2350,8 +2525,15 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         // ---------- 重置快捷键（Esc+0，来自钩子） ----------
         case WM_RESET: {
-            // 和点"重置"按钮完全一样：只重置草稿并置脏，不自动应用、不写盘。
+            // 快捷重置比"重置"按钮多做一步：重置完直接推进内存，不用再点"应用"。
+            // 理由：它的用途就是"一键回到出厂状态"，如果还要再点一次应用，
+            // 这个快捷键就只是省了两次点击，意义不大。
+            //
+            // 但**不写盘**：内存生效 ≠ 覆盖存档。g_dirty 保留，
+            // 退出时仍会问"要不要保存"，这样误按 Esc+0 不会把存档悄悄改掉。
             ResetDraftAndUI(hwnd);
+            ApplyDraft();
+            SetStatus(hwnd, "已重置为出厂默认并立即生效（未保存）");
             return 0;
         }
 
@@ -2373,6 +2555,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             // 比对的是草稿：用户看到什么就按什么判定，不能拿"已生效"的旧值来比。
             bool isSwitchButton = (btnId >= ID_BTN_SWITCH1 && btnId <= ID_BTN_SWITCH4);
             bool isBoostButton  = (btnId == ID_BTN_KEY_BOOST);
+            bool isWheelBoostButton = (btnId == ID_BTN_KEY_WHEELBOOST);
 
             bool isMappingKey = (vk == g_draft.keyUp || vk == g_draft.keyDown ||
                                  vk == g_draft.keyLeft || vk == g_draft.keyRight ||
@@ -2382,10 +2565,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             bool isSwitchKey = (vk == g_draft.switch1 || vk == g_draft.switch2 ||
                                 vk == g_draft.switch3 || vk == g_draft.switch4);
 
+            // 映射键和组合键必须和两个加速键都不重合：加速键不被拦截，
+            // 一旦重合，UpdateKeyState 的 if 链会先命中映射分支，加速永远不触发。
+            // 但"加速键 ↔ 滚轮加速键"之间**不判冲突**：默认两者都是 Shift，
+            // 相等时就是"一个键同时加速移动和滚轮"，这是合法且有意义的配置。
             bool conflict;
-            if (isSwitchButton)      conflict = isMappingKey || (vk == g_draft.boostKey);
-            else if (isBoostButton)  conflict = isMappingKey || isSwitchKey;
-            else                     conflict = isSwitchKey || (vk == g_draft.boostKey);
+            if (isSwitchButton) {
+                conflict = isMappingKey || (vk == g_draft.boostKey) ||
+                           (vk == g_draft.wheelBoostKey);
+            } else if (isBoostButton || isWheelBoostButton) {
+                conflict = isMappingKey || isSwitchKey;
+            } else {
+                conflict = isSwitchKey || (vk == g_draft.boostKey) ||
+                           (vk == g_draft.wheelBoostKey);
+            }
             if (conflict) {
                 MessageBoxA(hwnd, "该键已被另一种用途占用，请换一个键。", "按键冲突",
                             MB_OK | MB_ICONWARNING);
@@ -2416,6 +2609,8 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 g_draft.keyWheelDown = vk;
             }else if (btnId == ID_BTN_KEY_BOOST){
                 g_draft.boostKey = vk;
+            }else if (btnId == ID_BTN_KEY_WHEELBOOST){
+                g_draft.wheelBoostKey = vk;
             }else if (btnId == ID_BTN_SWITCH1){
                 g_draft.switch1 = vk;
             }else if (btnId == ID_BTN_SWITCH2){
@@ -2442,6 +2637,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 // 把自维护的按键状态复位，免得组合键/加速键卡在"一直按着"。
                 capsDown = false;
                 keyBoostDown = false;
+                wheelBoostDown = false;
 
                 if (waitingButtonId.load() != 0) {
                     waitingButtonId = 0;
