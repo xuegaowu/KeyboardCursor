@@ -1418,7 +1418,8 @@ bool ShouldIntercept(DWORD vkCode) {
            vkCode == keyLeft.load() || vkCode == keyRight.load() ||
            vkCode == keyLClick.load() || vkCode == keyRClick.load() ||
            vkCode == keyMClick.load() || vkCode == keyWheelUp.load() ||
-           vkCode == keyWheelDown.load();
+           vkCode == keyWheelDown.load() || vkCode == keyWheelBoost.load() ||
+           vkCode == keyBoost.load();
 }
 
 // ==================== 记录按键状态 ====================
